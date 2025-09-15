@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.eggs/
+.dist/
+dist/
+build/
+.python-version
+.mypy_cache/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.ruff_cache/
+
+# Environments
+.venv/
+venv/
+env/
+ENV/
+
+# Logs
+*.log
+logs/
+
+# IDE/Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Dotenv and secrets
+.env
+.env.*
+.env.local
+*.pem
+*.key
+
+# LiveKit/Media (if any recordings or artifacts)
+recordings/
+media/
+
+# Misc
+*.tmp
+*.cache/
+
+# Node (just in case)
+node_modules/
+
+
