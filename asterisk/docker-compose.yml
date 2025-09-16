@@ -1,0 +1,21 @@
+services:
+  asterisk:
+    image: ghcr.io/asterisk/asterisk:20
+    container_name: ai_asterisk
+    restart: unless-stopped
+    network_mode: bridge
+    ports:
+      - "5060:5060/udp"   # SIP UDP
+      - "5061:5061/tcp"   # SIP TLS (optional)
+      - "8088:8088"       # HTTP/WS for ARI and HTTP server
+      - "10000-10100:10000-10100/udp"  # RTP media ports
+    environment:
+      - ARI_USERNAME=ariuser
+      - ARI_PASSWORD=aripass
+    volumes:
+      - ./etc/asterisk:/etc/asterisk:ro
+      - asterisk-spool:/var/spool/asterisk
+      - asterisk-log:/var/log/asterisk
+volumes:
+  asterisk-spool:
+  asterisk-log:
