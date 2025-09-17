@@ -121,7 +121,7 @@ class Assistant(Agent):
             instructions=instructions_text,
             llm=google.beta.realtime.RealtimeModel(
                 voice="Leda",
-                temperature=0.5,
+                temperature=0.2,
             ),
             tools=[],
         )
@@ -166,7 +166,7 @@ async def entrypoint(ctx: agents.JobContext):
             # - If self-hosting, omit this parameter
             # - For telephony applications, use `BVCTelephony` for best results
             video_enabled=False,
-            # noise_cancellation=noise_cancellation.BVCTelephony(),
+            noise_cancellation=noise_cancellation.BVCTelephony(),
         ),
     )
 
