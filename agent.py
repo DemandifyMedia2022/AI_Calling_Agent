@@ -6,22 +6,22 @@ from livekit.plugins import (
     noise_cancellation,
 )
 from livekit.plugins import google
-from prompts import AGENT_INSTRUCTION, SESSION_INSTRUCTION
+from prompts import ENHANCED_DEMANDIFY_CALLER_INSTRUCTIONS, SESSION_INSTRUCTION
 import csv
 import os
 import logging
 load_dotenv()
 
 # Suppress unsupported option warning (truncate) from Google Realtime API
-# logging.getLogger("livekit.plugins.google").setLevel(logging.ERROR)
+logging.getLogger("livekit.plugins.google").setLevel(logging.ERROR)
 
 
 class Assistant(Agent):
     def __init__(self) -> None:
         super().__init__(
-            instructions=AGENT_INSTRUCTION,
+            instructions=ENHANCED_DEMANDIFY_CALLER_INSTRUCTIONS,
             llm=google.beta.realtime.RealtimeModel(
-            voice="Zephyr",
+            voice="Leda",
             temperature=0.5,
         ),
             tools=[],
@@ -55,7 +55,7 @@ async def entrypoint(ctx: agents.JobContext):
             # - If self-hosting, omit this parameter
             # - For telephony applications, use `BVCTelephony` for best results
             video_enabled=False,
-            noise_cancellation=noise_cancellation.BVCTelephony(),
+            # noise_cancellation=noise_cancellation.BVCTelephony(),
         ),
     )
 
