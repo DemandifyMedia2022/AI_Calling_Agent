@@ -13,7 +13,7 @@ import logging
 load_dotenv()
 
 # Suppress unsupported option warning (truncate) from Google Realtime API
-logging.getLogger("livekit.plugins.google").setLevel(logging.ERROR)
+# logging.getLogger("livekit.plugins.google").setLevel(logging.ERROR)
 
 
 class Assistant(Agent):
