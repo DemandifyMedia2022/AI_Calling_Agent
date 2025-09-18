@@ -9,10 +9,10 @@ from livekit.plugins import google
 from prompts import ENHANCED_DEMANDIFY_CALLER_INSTRUCTIONS, SESSION_INSTRUCTION
 import importlib
 import sys
-import tkinter as tk
 import csv
 import os
 import logging
+from typing import Optional, Tuple, List, Dict
 load_dotenv()
 
 # Suppress unsupported option warning (truncate) from Google Realtime API
@@ -82,35 +82,50 @@ def _select_campaign_from_console() -> tuple[str, str, str] | None:
         return None
 
 
-def _launch_campaign_gui() -> tuple[str, str, str] | None:
-    """Open a tiny Tkinter window with buttons to choose a campaign.
-    Returns (module, agent_attr, session_attr) or None if the window is closed without a selection.
-    """
+def _read_leads(leads_csv: str) -> List[Dict[str, str]]:
+    """Read all leads from the CSV as a list of dicts. Returns empty list on error."""
+    leads: List[Dict[str, str]] = []
     try:
-        root = tk.Tk()
-        root.title("Select Campaign")
-        root.geometry("360x240")
-        root.resizable(False, False)
+        with open(leads_csv, mode="r", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                # Normalize keys to expected set and ensure presence
+                leads.append({
+                    "prospect_name": row.get("prospect_name", "").strip(),
+                    "resource_name": row.get("resource_name", "").strip(),
+                    "job_title": row.get("job_title", "").strip(),
+                    "company_name": row.get("company_name", "").strip(),
+                    "email": row.get("email", "").strip(),
+                    "phone": row.get("phone", "").strip(),
+                    "timezone": row.get("timezone", "").strip(),
+                })
+    except Exception:
+        pass
+    return leads
 
-        selection: dict[str, tuple[str, str, str] | None] = {"value": None}
 
-        tk.Label(root, text="Choose a campaign:", font=("Segoe UI", 11, "bold")).pack(pady=10)
-
-        def on_select(name: str):
-            selection["value"] = CAMPAIGNS[name]
-            root.destroy()
-
-        for name in CAMPAIGNS.keys():
-            tk.Button(root, text=name, width=30, command=lambda n=name: on_select(n)).pack(pady=4)
-
-        def use_env():
-            selection["value"] = None
-            root.destroy()
-
-        tk.Button(root, text="Use .env settings", width=30, command=use_env).pack(pady=8)
-
-        root.mainloop()
-        return selection["value"]
+def _select_prospect_from_console(leads: List[Dict[str, str]]) -> Optional[Dict[str, str]]:
+    """Console menu to select a single prospect from the list. Returns the selected lead
+    or None to use defaults/env.
+    """
+    if not leads:
+        return None
+    try:
+        print("\nSelect Prospect (press Enter to use .env LEAD_INDEX or first row):")
+        for idx, ld in enumerate(leads, start=1):
+            name = ld.get("prospect_name", "")
+            title = ld.get("job_title", "")
+            comp = ld.get("company_name", "")
+            phone = ld.get("phone", "")
+            print(f"  [{idx}] {name} — {title} @ {comp} — {phone}")
+        choice = input("Enter number (or press Enter to skip): ").strip()
+        if not choice:
+            return None
+        i = int(choice)
+        if i < 1 or i > len(leads):
+            print("Invalid choice. Using defaults.")
+            return None
+        return leads[i - 1]
     except Exception:
         return None
 
@@ -125,7 +140,6 @@ class Assistant(Agent):
             ),
             tools=[],
         )
-        
 
 
 async def entrypoint(ctx: agents.JobContext):
@@ -133,17 +147,29 @@ async def entrypoint(ctx: agents.JobContext):
         
     )
 
-    # Load the next lead from CSV
+    # Load leads from CSV and determine which prospect to use
     leads_csv = os.getenv("LEADS_CSV_PATH", os.path.join(os.path.dirname(__file__), "leads.csv"))
-    lead = None
+    all_leads = _read_leads(leads_csv)
+    lead: Optional[Dict[str, str]] = None
+
+    # Priority: env index > console selection > first row
+    # Use environment variable LEAD_INDEX (1-based) if provided
     try:
-        with open(leads_csv, mode="r", encoding="utf-8-sig") as f:
-            reader = csv.DictReader(f)
-            lead = next(reader, None)
-    except FileNotFoundError:
-        lead = None
+        env_idx = os.getenv("LEAD_INDEX")
+        if env_idx:
+            i = int(env_idx) - 1
+            if 0 <= i < len(all_leads):
+                lead = all_leads[i]
     except Exception:
-        lead = None
+        pass
+    # If no env index provided or invalid, offer console selection
+    if lead is None:
+        sel_lead = _select_prospect_from_console(all_leads)
+        if sel_lead is not None:
+            lead = sel_lead
+    # Fallback to first row if still None
+    if lead is None and all_leads:
+        lead = all_leads[0]
 
     # Prefer GUI override if set; else offer console selection; else use env
     selection = CAMPAIGN_OVERRIDE or _select_campaign_from_console()
@@ -203,9 +229,5 @@ async def entrypoint(ctx: agents.JobContext):
 
 
 if __name__ == "__main__":
-    # If started with `gui`, show a small selection window first.
-    if len(sys.argv) > 1 and sys.argv[1].lower() == "gui":
-        sel = _launch_campaign_gui()
-        if sel:
-            CAMPAIGN_OVERRIDE = sel  # type: ignore[assignment]
+    # Console-only: run single call session with console-based selections
     agents.cli.run_app(agents.WorkerOptions(entrypoint_fnc=entrypoint))
