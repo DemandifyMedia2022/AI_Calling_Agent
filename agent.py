@@ -13,7 +13,25 @@ import csv
 import os
 import logging
 from typing import Optional, Tuple, List, Dict
+import subprocess
 load_dotenv()
+
+# Global logging: keep terminal clean
+logging.basicConfig(level=logging.WARNING, format="%(message)s")
+
+# Reduce noise from common modules
+for noisy in [
+    "livekit.agents",
+    "livekit.rtc",
+    "livekit",
+    "google_genai",
+    "google_genai.live",
+    "asyncio",
+    "opentelemetry",
+    "httpx",
+    "httpcore",
+]:
+    logging.getLogger(noisy).setLevel(logging.ERROR)
 
 # Suppress unsupported option warning (truncate) from Google Realtime API
 logging.getLogger("livekit.plugins.google").setLevel(logging.ERROR)
@@ -28,6 +46,30 @@ CAMPAIGNS = {
 }
 
 CAMPAIGN_OVERRIDE: tuple[str, str, str] | None = None
+
+
+# ------------------------------
+# Console styling (ANSI)
+# ------------------------------
+try:
+    # Optional: helps colors render on Windows terminals
+    from colorama import init as _colorama_init  # type: ignore
+    _colorama_init(autoreset=True)
+except Exception:
+    pass
+
+RESET = "\x1b[0m"
+BOLD = "\x1b[1m"
+DIM = "\x1b[2m"
+CYAN = "\x1b[36m"
+GREEN = "\x1b[32m"
+YELLOW = "\x1b[33m"
+MAGENTA = "\x1b[35m"
+BLUE = "\x1b[34m"
+GRAY = "\x1b[90m"
+
+def _s(text: str, *styles: str) -> str:
+    return f"{''.join(styles)}{text}{RESET}"
 
 
 def _load_campaign_prompts(module_name: str | None = None,
@@ -65,15 +107,18 @@ def _select_campaign_from_console() -> tuple[str, str, str] | None:
     or None if user chooses to keep env defaults.
     """
     try:
-        print("\nSelect Campaign (press Enter to use .env settings):")
+        print()
+        print(_s("┌──────────────────────────────────────────────┐", CYAN))
+        print(_s("│ Select Campaign (press Enter for .env)       │", CYAN))
+        print(_s("└──────────────────────────────────────────────┘", CYAN))
         for idx, name in enumerate(CAMPAIGNS.keys(), start=1):
-            print(f"  [{idx}] {name}")
-        choice = input("Enter number (or press Enter to skip): ").strip()
+            print(f"  {_s(f'[{idx}]', CYAN)} {_s(name, BOLD)}")
+        choice = input(_s("Enter number (or press Enter to skip): ", GREEN)).strip()
         if not choice:
             return None
         idx = int(choice)
         if idx < 1 or idx > len(CAMPAIGNS):
-            print("Invalid choice. Using .env settings.")
+            print(_s("Invalid choice. Using .env settings.", YELLOW))
             return None
         name = list(CAMPAIGNS.keys())[idx - 1]
         return CAMPAIGNS[name]
@@ -111,19 +156,22 @@ def _select_prospect_from_console(leads: List[Dict[str, str]]) -> Optional[Dict[
     if not leads:
         return None
     try:
-        print("\nSelect Prospect (press Enter to use .env LEAD_INDEX or first row):")
+        print()
+        print(_s("┌─────────────────────────────────────────────────────────────┐", CYAN))
+        print(_s("│ Select Prospect (Enter = use .env index or first row)       │", CYAN))
+        print(_s("└─────────────────────────────────────────────────────────────┘", CYAN))
         for idx, ld in enumerate(leads, start=1):
             name = ld.get("prospect_name", "")
             title = ld.get("job_title", "")
             comp = ld.get("company_name", "")
             phone = ld.get("phone", "")
-            print(f"  [{idx}] {name} — {title} @ {comp} — {phone}")
-        choice = input("Enter number (or press Enter to skip): ").strip()
+            print(f"  {_s(f'[{idx:02d}]', CYAN)} {_s(name, BOLD)} {_s('—', GRAY)} {_s(title, DIM)} {_s('@', GRAY)} {comp} {_s('—', GRAY)} {_s(phone, BLUE)}")
+        choice = input(_s("Enter number (or press Enter to skip): ", GREEN)).strip()
         if not choice:
             return None
         i = int(choice)
         if i < 1 or i > len(leads):
-            print("Invalid choice. Using defaults.")
+            print(_s("Invalid choice. Using defaults.", YELLOW))
             return None
         return leads[i - 1]
     except Exception:
@@ -171,8 +219,13 @@ async def entrypoint(ctx: agents.JobContext):
     if lead is None and all_leads:
         lead = all_leads[0]
 
-    # Prefer GUI override if set; else offer console selection; else use env
-    selection = CAMPAIGN_OVERRIDE or _select_campaign_from_console()
+    # Campaign selection:
+    # - In child single-call runs, DO NOT prompt; rely on environment set by parent
+    # - In parent interactive run, allow console campaign selection
+    if os.getenv("RUN_SINGLE_CALL") == "1":
+        selection = CAMPAIGN_OVERRIDE  # use env/defaults
+    else:
+        selection = CAMPAIGN_OVERRIDE or _select_campaign_from_console()
     if selection:
         mod_name, agent_attr, session_attr = selection
         agent_instructions_text, session_instructions_text = _load_campaign_prompts(
@@ -229,5 +282,79 @@ async def entrypoint(ctx: agents.JobContext):
 
 
 if __name__ == "__main__":
-    # Console-only: run single call session with console-based selections
-    agents.cli.run_app(agents.WorkerOptions(entrypoint_fnc=entrypoint))
+    # If invoked as a child single-call run, execute one session and exit
+    if os.getenv("RUN_SINGLE_CALL") == "1":
+        agents.cli.run_app(agents.WorkerOptions(entrypoint_fnc=entrypoint))
+        sys.exit(0)
+
+    # Parent controller loop (console-only): choose campaign once, then repeatedly choose prospects
+    # Determine and set campaign env for child calls
+    sel = CAMPAIGN_OVERRIDE or _select_campaign_from_console()
+    campaign_env: dict[str, str] = {}
+    if sel:
+        mod_name, agent_attr, session_attr = sel
+        campaign_env = {
+            "CAMPAIGN_PROMPT_MODULE": mod_name,
+            "CAMPAIGN_AGENT_NAME": agent_attr,
+            "CAMPAIGN_SESSION_NAME": session_attr,
+        }
+
+    leads_csv_path = os.getenv("LEADS_CSV_PATH", os.path.join(os.path.dirname(__file__), "leads.csv"))
+    leads_list = _read_leads(leads_csv_path)
+    if not leads_list:
+        print("No leads found. Please check leads.csv or LEADS_CSV_PATH.")
+        sys.exit(1)
+
+    pointer = 0  # default next index for Enter-to-next behavior
+
+    while True:
+        # Print menu
+        print()
+        print(_s("╔════════════════════════ Prospect Selection ════════════════════════╗", CYAN))
+        for idx, ld in enumerate(leads_list, start=1):
+            name = ld.get("prospect_name", "")
+            title = ld.get("job_title", "")
+            comp = ld.get("company_name", "")
+            phone = ld.get("phone", "")
+            marker = _s("← next", GREEN) if (idx - 1) == pointer else ""
+            print(f"  {_s(f'[{idx:02d}]', CYAN)} {_s(name, BOLD)} {_s('—', GRAY)} {_s(title, DIM)} {_s('@', GRAY)} {comp} {_s('—', GRAY)} {_s(phone, BLUE)} {marker}")
+        print(_s("╚════════════════════════════════════════════════════════════════════╝", CYAN))
+        print(_s("Press Enter = NEXT • Type number = specific lead • 'q' = quit", DIM))
+        choice = input(_s("Your choice: ", GREEN)).strip().lower()
+
+        if choice == "q":
+            print(_s("Exiting.", YELLOW))
+            break
+
+        if choice == "":
+            call_index = pointer
+        else:
+            try:
+                num = int(choice)
+                if 1 <= num <= len(leads_list):
+                    call_index = num - 1
+                else:
+                    print(_s("Invalid number. Try again.", YELLOW))
+                    continue
+            except ValueError:
+                print(_s("Invalid input. Try again.", YELLOW))
+                continue
+
+        # Prepare env and run child single-call process
+        child_env = os.environ.copy()
+        child_env.update(campaign_env)
+        child_env["LEAD_INDEX"] = str(call_index + 1)
+        child_env["RUN_SINGLE_CALL"] = "1"
+
+        print(_s(f"\n▶ Starting call for lead #{call_index + 1}... (returning to menu when finished)\n", MAGENTA))
+        # Use 'console' subcommand so audio I/O (Ctrl+B to toggle Audio/Text) is available
+        try:
+            subprocess.run([sys.executable, __file__, "console"], env=child_env, check=False)
+        except KeyboardInterrupt:
+            print(_s("\nCall interrupted. Returning to menu...\n", YELLOW))
+
+        # Advance pointer when using Enter (next) or when the called index equals pointer
+        if call_index == pointer:
+            pointer = min(pointer + 1, len(leads_list) - 1)
+
+    sys.exit(0)
