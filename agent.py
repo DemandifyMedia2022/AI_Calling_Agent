@@ -72,6 +72,14 @@ def _s(text: str, *styles: str) -> str:
     return f"{''.join(styles)}{text}{RESET}"
 
 
+def _campaign_display_name(name: str) -> str:
+    """Return a cleaned campaign name without parenthetical suffixes like ' (prompts2)'."""
+    try:
+        return name.split(" (")[0].strip()
+    except Exception:
+        return name
+
+
 def _load_campaign_prompts(module_name: str | None = None,
                            agent_attr: str | None = None,
                            session_attr: str | None = None):
@@ -112,7 +120,8 @@ def _select_campaign_from_console() -> tuple[str, str, str] | None:
         print(_s("│ Select Campaign (press Enter for .env)       │", CYAN))
         print(_s("└──────────────────────────────────────────────┘", CYAN))
         for idx, name in enumerate(CAMPAIGNS.keys(), start=1):
-            print(f"  {_s(f'[{idx}]', CYAN)} {_s(name, BOLD)}")
+            clean = _campaign_display_name(name)
+            print(f"  {_s(f'[{idx}]', CYAN)} {_s(clean, BOLD)}")
         choice = input(_s("Enter number (or press Enter to skip): ", GREEN)).strip()
         if not choice:
             return None
@@ -162,10 +171,8 @@ def _select_prospect_from_console(leads: List[Dict[str, str]]) -> Optional[Dict[
         print(_s("└─────────────────────────────────────────────────────────────┘", CYAN))
         for idx, ld in enumerate(leads, start=1):
             name = ld.get("prospect_name", "")
-            title = ld.get("job_title", "")
             comp = ld.get("company_name", "")
-            phone = ld.get("phone", "")
-            print(f"  {_s(f'[{idx:02d}]', CYAN)} {_s(name, BOLD)} {_s('—', GRAY)} {_s(title, DIM)} {_s('@', GRAY)} {comp} {_s('—', GRAY)} {_s(phone, BLUE)}")
+            print(f"  {_s(f'[{idx:02d}]', CYAN)} {_s(name, BOLD)} {_s('—', GRAY)} {comp}")
         choice = input(_s("Enter number (or press Enter to skip): ", GREEN)).strip()
         if not choice:
             return None
@@ -306,33 +313,64 @@ if __name__ == "__main__":
         sys.exit(1)
 
     pointer = 0  # default next index for Enter-to-next behavior
+    page_size = 8
+    current_page = 0
+
+    # Determine selected campaign label for badge from selection/env
+    selected_campaign_label = ""
+    if sel:
+        # Find the original key name that maps to sel to display a clean label
+        for key, val in CAMPAIGNS.items():
+            if val == sel:
+                selected_campaign_label = _campaign_display_name(key)
+                break
 
     while True:
         # Print menu
         print()
-        print(_s("╔════════════════════════ Prospect Selection ════════════════════════╗", CYAN))
-        for idx, ld in enumerate(leads_list, start=1):
+        # Selected campaign badge
+        if selected_campaign_label:
+            print(_s(f"[{selected_campaign_label}]", BOLD, BLUE))
+
+        total_pages = max(1, (len(leads_list) + page_size - 1) // page_size)
+        current_page = max(0, min(current_page, total_pages - 1))
+        start = current_page * page_size
+        end = min(start + page_size, len(leads_list))
+
+        print(_s(f"╔════════════════════════ Prospect Selection (Page {current_page+1}/{total_pages}) ════════════════════════╗", CYAN))
+        for idx_global in range(start, end):
+            ld = leads_list[idx_global]
             name = ld.get("prospect_name", "")
-            title = ld.get("job_title", "")
             comp = ld.get("company_name", "")
-            phone = ld.get("phone", "")
-            marker = _s("← next", GREEN) if (idx - 1) == pointer else ""
-            print(f"  {_s(f'[{idx:02d}]', CYAN)} {_s(name, BOLD)} {_s('—', GRAY)} {_s(title, DIM)} {_s('@', GRAY)} {comp} {_s('—', GRAY)} {_s(phone, BLUE)} {marker}")
-        print(_s("╚════════════════════════════════════════════════════════════════════╝", CYAN))
-        print(_s("Press Enter = NEXT • Type number = specific lead • 'q' = quit", DIM))
+            idx_display = (idx_global - start) + 1
+            marker = _s("← next", GREEN) if idx_global == pointer else ""
+            print(f"  {_s(f'[{idx_display:02d}]', CYAN)} {_s(name, BOLD)} {_s('—', GRAY)} {comp} {marker}")
+        print(_s("╚══════════════════════════════════════════════════════════════════════════════════════════════════════════╝", CYAN))
+        print(_s("Enter = NEXT • Number = select on this page • N = next page • P = prev page • 'q' = quit", DIM))
         choice = input(_s("Your choice: ", GREEN)).strip().lower()
 
         if choice == "q":
             print(_s("Exiting.", YELLOW))
             break
 
+        # Pagination controls
+        if choice == "n":
+            if current_page < total_pages - 1:
+                current_page += 1
+            continue
+        if choice == "p":
+            if current_page > 0:
+                current_page -= 1
+            continue
+
         if choice == "":
             call_index = pointer
         else:
             try:
                 num = int(choice)
-                if 1 <= num <= len(leads_list):
-                    call_index = num - 1
+                # Map page-local number to global index
+                if 1 <= num <= (end - start):
+                    call_index = start + (num - 1)
                 else:
                     print(_s("Invalid number. Try again.", YELLOW))
                     continue
@@ -356,5 +394,9 @@ if __name__ == "__main__":
         # Advance pointer when using Enter (next) or when the called index equals pointer
         if call_index == pointer:
             pointer = min(pointer + 1, len(leads_list) - 1)
+        # If pointer moved out of current page, advance page automatically
+        if not (start <= pointer < end):
+            if pointer >= end and current_page < total_pages - 1:
+                current_page += 1
 
     sys.exit(0)
