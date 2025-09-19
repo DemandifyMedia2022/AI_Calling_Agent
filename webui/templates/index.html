@@ -1,39 +1,43 @@
 {% extends "base.html" %}
 {% block content %}
-  <section class="controls" style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
-    <form id="campaignForm" class="controls-form" style="display:flex; align-items:center; gap:8px;">
+  <section class="controls">
+    <form id="campaignForm" class="controls-form">
       <label for="campaign">Campaign</label>
       <select name="campaign" id="campaign" class="select">
         {% for opt in campaign_options %}
           <option value="{{ opt.key }}" {% if opt.selected %}selected{% endif %}>{{ opt.label }}</option>
         {% endfor %}
       </select>
-      <button type="submit" class="btn">Apply</button>
+      <button type="submit" class="btn primary">Apply</button>
     </form>
-    <div id="campaignBadge" class="badge">Campaign: <strong>{% if campaign_label %}{{ campaign_label }}{% elif campaign %}{{ campaign }}{% else %}Not set{% endif %}</strong></div>
-    <label style="display:flex; align-items:center; gap:6px;">
+    <div id="campaignBadge" class="badge {% if not campaign %}warning{% endif %}">Campaign: <strong>{% if campaign_label %}{{ campaign_label }}{% elif campaign %}{{ campaign }}{% else %}Not set{% endif %}</strong></div>
+    <label style="display:flex; align-items:center; gap:6px;margin-top:8px">
       <input type="checkbox" id="autoNextToggle" /> Auto Next
     </label>
-    <button id="stopAllBtn" class="btn danger ghost">End Session</button>
   </section>
 
-  <section id="statusPanel" style="margin: 12px 0; display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+  <section id="statusPanel" class="status-panel">
     <div class="badge">Status: <strong id="callStatus">idle</strong><span id="statusDetails" style="margin-left:8px; color:#666;"></span></div>
-    <button id="endCallBtn" class="btn danger" disabled>End Current Call</button>
+    <div style="margin-left:auto; display:flex; gap:16px; flex-wrap:wrap; align-items:center;margin-top:8px">
+      {# Compute next pointer (start_index + count shown) #}
+      <button id="callNextBtn" class="btn" data-next-index="{{ start_index + leads|length }}">Call Next</button>
+      <button id="endCallBtn" class="btn danger" disabled>End Current Call</button>
+      <button id="stopAllBtn" class="btn danger ghost">End Session</button>
+    </div>
   </section>
 
   <section id="currentCallSection" style="display:none;">
-    <div id="currentCallCard" style="background:#0f172a; border:1px solid #1f2937; border-radius:10px; padding:16px; display:flex; gap:16px; align-items:flex-start; box-shadow: 0 10px 30px rgba(0,0,0,0.25);">
-      <div style="width:48px; height:48px; border-radius:50%; background:#111827; display:flex; align-items:center; justify-content:center;">
-        <div id="callSpinner" style="width:22px; height:22px; border:3px solid rgba(255,255,255,0.15); border-top-color:#22c55e; border-radius:50%; animation: spin 1s linear infinite;"></div>
+    <div id="currentCallCard" class="call-card">
+      <div class="avatar">
+        <div id="callSpinner" class="spinner"></div>
       </div>
       <div style="flex:1;">
-        <div style="display:flex; align-items:center; gap:10px; margin-bottom:6px;">
-          <h3 id="callHeadline" style="margin:0; font-size:18px;">Connecting…</h3>
-          <span id="callChip" style="font-size:12px; padding:4px 8px; border-radius:16px; background:#1f2937; color:#a7f3d0;">Waiting</span>
+        <div style="display:flex; align-items:center; gap:10px; margin-bottom:16px;margin-top:18px">
+          <h3 id="callHeadline" style="margin:1px; font-size:18px;">Connecting…</h3>
+          <span id="callChip" class="chip">Waiting</span>
         </div>
         <div id="callProspect" style="font-size:16px; font-weight:600; margin-bottom:2px;">—</div>
-        <div id="callCompany" style="font-size:14px; color:#9ca3af; margin-bottom:8px;">—</div>
+        <div id="callCompany" class="muted" style="font-size:14px; margin-bottom:8px;">—</div>
         <div style="display:flex; gap:16px; flex-wrap:wrap; color:#d1d5db; font-size:13px;">
           <div><strong>Title:</strong> <span id="callJob">—</span></div>
           <div><strong>Phone:</strong> <span id="callPhone">—</span></div>
@@ -43,9 +47,6 @@
         </div>
       </div>
     </div>
-    <style>
-      @keyframes spin { from { transform: rotate(0deg);} to { transform: rotate(360deg);} }
-    </style>
   </section>
 
   <section class="leads">
@@ -91,12 +92,14 @@
       </tbody>
     </table>
 
-    <div class="actions">
-      {# Compute next pointer (start_index + count shown) #}
-      <button id="callNextBtn" class="btn" data-next-index="{{ start_index + leads|length }}">Call Next</button>
-    </div>
+    <!-- Numeric pagination -->
+    <nav class="pagination">
+      {% for p in range(1, total_pages + 1) %}
+        <a class="page-link {% if p == page %}active{% endif %}" href="/?page={{ p }}{% if campaign %}&campaign={{ campaign }}{% endif %}">{{ p }}</a>
+      {% endfor %}
+    </nav>
   </section>
-  <div id="toastContainer" style="position:fixed; top:16px; right:16px; display:flex; flex-direction:column; gap:8px; z-index:9999;"></div>
+  <div id="toastContainer" class="toast-container"></div>
   <script>
     (function(){
       const statusEl = document.getElementById('callStatus');
@@ -119,6 +122,7 @@
       const callTz = document.getElementById('callTz');
       const callCampaign = document.getElementById('callCampaign');
       const callSpinner = document.getElementById('callSpinner');
+      const topProgress = document.getElementById('topProgress');
 
       let lastRunning = false;
       let lastLead = null;
@@ -126,15 +130,24 @@
       function toast(msg, type='info'){
         const wrap = document.getElementById('toastContainer');
         const el = document.createElement('div');
+        el.className = 'toast ' + (type || 'info');
         el.textContent = msg;
-        el.style.padding = '10px 14px';
-        el.style.borderRadius = '6px';
-        el.style.color = '#fff';
-        el.style.boxShadow = '0 6px 20px rgba(0,0,0,0.15)';
-        el.style.background = type==='error' ? '#E53935' : (type==='success' ? '#2E7D32' : '#1565C0');
         wrap.appendChild(el);
+        requestAnimationFrame(() => { el.style.opacity = '1'; });
         setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity 300ms'; }, 2400);
-        setTimeout(() => { wrap.removeChild(el); }, 2800);
+        setTimeout(() => { if (el.parentNode===wrap) wrap.removeChild(el); }, 2800);
+      }
+
+      function startProgress(){
+        if (!topProgress) return;
+        topProgress.style.opacity = '1';
+        topProgress.style.width = '30%';
+        requestAnimationFrame(() => { topProgress.style.width = '60%'; });
+      }
+      function endProgress(){
+        if (!topProgress) return;
+        topProgress.style.width = '100%';
+        setTimeout(() => { topProgress.style.opacity = '0'; topProgress.style.width = '0%'; }, 250);
       }
 
       async function postForm(url, data){
@@ -142,7 +155,9 @@
         for (const [k,v] of Object.entries(data)){
           if (v !== undefined && v !== null){ body.append(k, String(v)); }
         }
+        startProgress();
         const res = await fetch(url, { method: 'POST', body });
+        endProgress();
         if (!res.ok) throw new Error('Request failed');
         return await res.json();
       }
@@ -227,6 +242,8 @@
           const resp = await postForm('/api/select_campaign', { campaign: val });
           const label = (resp && resp.campaign_label) ? resp.campaign_label : (val || 'Not set');
           campaignBadge.innerHTML = 'Campaign: <strong>' + label + '</strong>';
+          if (!val) { campaignBadge.classList.add('warning'); }
+          else { campaignBadge.classList.remove('warning'); }
           toast('Campaign applied', 'success');
         } catch(e) {
           alert('Failed to set campaign');
@@ -254,11 +271,12 @@
           callChip.style.color = '#a7f3d0';
           callSection.style.display = 'block';
           try {
+            btn.disabled = true;
             await postForm('/api/start_call', { lead_global_index: idx, campaign: camp });
             setTimeout(refreshStatus, 300);
           } catch(e) {
             alert('Failed to start call');
-          }
+          } finally { btn.disabled = false; }
         });
       });
 
@@ -268,22 +286,24 @@
           const nextIdx = parseInt(nextBtn.getAttribute('data-next-index'));
           const camp = campaignSelect.value || '';
           try {
+            nextBtn.disabled = true;
             await postForm('/api/start_call', { lead_global_index: nextIdx, campaign: camp });
             setTimeout(refreshStatus, 300);
           } catch(e) {
             alert('Failed to start next call');
-          }
+          } finally { nextBtn.disabled = false; }
         });
       }
 
       // End current call (auto-next enabled by default)
       endBtn.addEventListener('click', async () => {
         try {
+          endBtn.disabled = true;
           await postForm('/api/end_call', { auto_next: autoNextToggle.checked });
           setTimeout(refreshStatus, 500);
         } catch(e) {
           alert('Failed to end call');
-        }
+        } finally { endBtn.disabled = false; }
       });
 
       // Auto Next toggle
@@ -299,12 +319,18 @@
       // End whole session
       stopAllBtn.addEventListener('click', async () => {
         try {
+          stopAllBtn.disabled = true;
           await postForm('/api/stop_all', {});
           setTimeout(refreshStatus, 400);
           toast('Session ended', 'error');
         } catch(e) {
           alert('Failed to end session');
-        }
+        } finally { stopAllBtn.disabled = false; }
+      });
+
+      // Show progress when clicking pagination
+      document.querySelectorAll('.page-link').forEach(a => {
+        a.addEventListener('click', () => { startProgress(); });
       });
 
       // Poll status
@@ -313,3 +339,4 @@
     })();
   </script>
 {% endblock %}
+
