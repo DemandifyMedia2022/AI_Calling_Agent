@@ -2,3 +2,7 @@ livekit-agents
 livekit-plugins-google
 livekit-plugins-noise-cancellation
 python-dotenv
+fastapi
+uvicorn
+jinja2
+PyJWT
