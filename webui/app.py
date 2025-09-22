@@ -8,8 +8,8 @@ import subprocess
 from pathlib import Path
 from typing import List, Dict, Optional
 
-from fastapi import FastAPI, Request, Form, BackgroundTasks, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, Response
+from fastapi import FastAPI, Request, Form, BackgroundTasks, HTTPException, UploadFile, File
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, Response, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -17,6 +17,9 @@ from fastapi.templating import Jinja2Templates
 BASE_DIR = Path(__file__).resolve().parents[1]
 AGENT_PATH = str(BASE_DIR / "agent.py")
 LEADS_CSV = os.getenv("LEADS_CSV_PATH", str(BASE_DIR / "leads.csv"))
+CSV_DIR = Path(os.getenv("LEADS_CSV_DIR", str(BASE_DIR))).resolve()
+CSV_DIR.mkdir(parents=True, exist_ok=True)
+_SELECTED_FILE_STORE = BASE_DIR / ".leads_csv"
 
 # Import campaign mapping and display helper from backend
 try:
@@ -69,6 +72,44 @@ SELECTED_CAMPAIGN: Optional[str] = None
 AUTO_NEXT: bool = False
 _WATCHER_STARTED: bool = False
 
+# -----------------------------
+# CSV management helpers
+# -----------------------------
+
+def _safe_csv_name(name: str) -> str:
+    name = (name or "").strip()
+    # Strip directories and only allow basic chars
+    name = os.path.basename(name)
+    # Enforce .csv extension
+    if not name.lower().endswith(".csv"):
+        name = name + ".csv"
+    # Replace unsafe characters
+    safe = []
+    for ch in name:
+        if ch.isalnum() or ch in ("-", "_", "."):
+            safe.append(ch)
+        else:
+            safe.append("_")
+    return "".join(safe)
+
+
+def _persist_selected_csv(path: Path) -> None:
+    try:
+        _SELECTED_FILE_STORE.write_text(str(path.resolve()), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _load_persisted_selected_csv() -> Optional[Path]:
+    try:
+        p = _SELECTED_FILE_STORE.read_text(encoding="utf-8").strip()
+        candidate = Path(p)
+        if candidate.suffix.lower() == ".csv" and candidate.exists():
+            return candidate
+    except Exception:
+        pass
+    return None
+
 
 def read_leads(csv_path: str) -> List[Dict[str, str]]:
     """Read leads with as many useful fields as available."""
@@ -98,6 +139,12 @@ def get_lead_by_index_1based(idx1: int) -> Optional[Dict[str, str]]:
     except Exception:
         pass
     return None
+
+
+# Initialize selected CSV from persisted file if available
+persisted = _load_persisted_selected_csv()
+if persisted:
+    LEADS_CSV = str(persisted)
 
 
 def spawn_call(lead_index_1based: int, campaign_key: Optional[str]) -> None:
@@ -227,6 +274,7 @@ async def dashboard(request: Request, page: int = 1, campaign: Optional[str] = N
             "page": page,
             "total_pages": total_pages,
             "start_index": start,  # zero-based for row numbering
+            "active_csv": os.path.basename(LEADS_CSV) if LEADS_CSV else "",
         },
     )
 
@@ -247,6 +295,107 @@ async def call_lead(
     if campaign:
         url += f"&campaign={campaign}"
     return RedirectResponse(url=url, status_code=303)
+
+
+# -----------------------------
+# CSV Management API
+# -----------------------------
+
+@app.get("/api/csv/list")
+async def api_csv_list():
+    files = []
+    try:
+        for p in sorted(CSV_DIR.glob("*.csv")):
+            try:
+                stat = p.stat()
+                files.append({
+                    "name": p.name,
+                    "size": stat.st_size,
+                    "mtime": int(stat.st_mtime),
+                    "active": str(p.resolve()) == str(Path(LEADS_CSV).resolve()) if LEADS_CSV else False,
+                })
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return JSONResponse({"ok": True, "files": files})
+
+
+@app.post("/api/csv/upload")
+async def api_csv_upload(file: UploadFile = File(...)):
+    if not file or not file.filename:
+        raise HTTPException(status_code=400, detail="No file provided")
+    name = _safe_csv_name(file.filename)
+    dest = CSV_DIR / name
+    try:
+        content = await file.read()
+        # Basic size guard (10MB)
+        if len(content) > 10 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="File too large (max 10MB)")
+        dest.write_bytes(content)
+        return JSONResponse({"ok": True, "name": name})
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to save file")
+
+
+@app.post("/api/csv/select")
+async def api_csv_select(name: str = Form(...)):
+    global LEADS_CSV
+    name = _safe_csv_name(name)
+    target = (CSV_DIR / name).resolve()
+    if not target.exists() or target.suffix.lower() != ".csv":
+        raise HTTPException(status_code=404, detail="CSV not found")
+    LEADS_CSV = str(target)
+    _persist_selected_csv(target)
+    return JSONResponse({"ok": True, "active": name})
+
+
+@app.delete("/api/csv/{name}")
+async def api_csv_delete(name: str):
+    name = _safe_csv_name(name)
+    target = (CSV_DIR / name).resolve()
+    # Prevent deleting active CSV in-use
+    if LEADS_CSV and Path(LEADS_CSV).resolve() == target:
+        raise HTTPException(status_code=400, detail="Cannot delete the active CSV. Select another file first.")
+    if not target.exists() or target.suffix.lower() != ".csv":
+        raise HTTPException(status_code=404, detail="CSV not found")
+    try:
+        target.unlink()
+        return JSONResponse({"ok": True})
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to delete file")
+
+
+@app.get("/api/csv/preview")
+async def api_csv_preview(name: str, limit: int = 10):
+    name = _safe_csv_name(name)
+    target = (CSV_DIR / name).resolve()
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="CSV not found")
+    try:
+        rows = []
+        headers: List[str] = []
+        with open(target, "r", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            headers = list(reader.fieldnames or [])
+            for i, row in enumerate(reader):
+                if i >= max(1, limit):
+                    break
+                rows.append({k: (row.get(k) or "") for k in headers})
+        return JSONResponse({"ok": True, "headers": headers, "rows": rows})
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to read CSV")
+
+
+@app.get("/api/csv/download/{name}")
+async def api_csv_download(name: str):
+    name = _safe_csv_name(name)
+    target = (CSV_DIR / name).resolve()
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="CSV not found")
+    return FileResponse(str(target), media_type="text/csv", filename=name)
 
 
 # -----------------------------

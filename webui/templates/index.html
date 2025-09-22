@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block content %}
+  <section id="dashboardView">
   <section class="controls">
     <form id="campaignForm" class="controls-form">
       <label for="campaign">Campaign</label>
@@ -15,6 +16,7 @@
       <input type="checkbox" id="autoNextToggle" /> Auto Next
     </label>
   </section>
+
 
   <section id="statusPanel" class="status-panel">
     <div class="badge">Status: <strong id="callStatus">idle</strong><span id="statusDetails" style="margin-left:8px; color:#666;"></span></div>
@@ -99,6 +101,50 @@
       {% endfor %}
     </nav>
   </section>
+  </section>
+
+  <!-- CSV Manager Main View -->
+  <section id="csvView" style="display:none;">
+    <section class="panel" id="csvManager" style="margin-top:12px; margin-bottom:18px;">
+      <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
+        <h2 style="margin:0;">CSV Manager</h2>
+        <div class="badge">Active: <strong id="activeCsv">{{ active_csv if active_csv else 'leads.csv' }}</strong></div>
+      </div>
+      <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:10px;">
+        <input type="file" id="csvFileInput" accept=".csv" />
+        <button id="uploadCsvBtn" class="btn sm icon-btn" aria-label="Upload CSV" title="Upload CSV"><iconify-icon icon="mdi:upload"></iconify-icon></button>
+        <button id="refreshCsvBtn" class="btn ghost sm icon-btn" aria-label="Refresh List" title="Refresh List"><iconify-icon icon="mdi:refresh"></iconify-icon></button>
+      </div>
+
+      <div id="csvListWrap" style="margin-top:12px; overflow:auto;">
+        <table class="table compact">
+          <thead>
+            <tr>
+              <th>File</th>
+              <th>Details</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="csvTableBody">
+            <!-- Filled by JS -->
+          </tbody>
+        </table>
+      </div>
+
+      <div id="csvPreviewWrap" style="display:none; margin-top:12px;">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <h3 id="previewTitle" style="margin:0;">Preview</h3>
+          <button id="closePreviewBtn" class="btn ghost" style="margin-left:auto;">Close</button>
+        </div>
+        <div style="overflow:auto;border:1px solid #1f2937;border-radius:8px;margin-top:8px;">
+          <table class="table" id="previewTable">
+            <thead><tr id="previewHead"></tr></thead>
+            <tbody id="previewBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </section>
   <div id="toastContainer" class="toast-container"></div>
   <script>
     (function(){
@@ -123,9 +169,39 @@
       const callCampaign = document.getElementById('callCampaign');
       const callSpinner = document.getElementById('callSpinner');
       const topProgress = document.getElementById('topProgress');
+      // CSV Manager elements (main view)
+      const csvFileInput = document.getElementById('csvFileInput');
+      const uploadCsvBtn = document.getElementById('uploadCsvBtn');
+      const refreshCsvBtn = document.getElementById('refreshCsvBtn');
+      const csvTableBody = document.getElementById('csvTableBody');
+      const activeCsv = document.getElementById('activeCsv');
+      const previewWrap = document.getElementById('csvPreviewWrap');
+      const previewTitle = document.getElementById('previewTitle');
+      const previewHead = document.getElementById('previewHead');
+      const previewBody = document.getElementById('previewBody');
+      const closePreviewBtn = document.getElementById('closePreviewBtn');
+      const csvView = document.getElementById('csvView');
+      const dashboardView = document.getElementById('dashboardView');
 
       let lastRunning = false;
       let lastLead = null;
+
+      // Hash router to toggle Dashboard <-> CSV Manager views
+      function showView(which){
+        if (which === 'csv'){
+          if (dashboardView) dashboardView.style.display = 'none';
+          if (csvView) csvView.style.display = 'block';
+          loadCsvList();
+        } else {
+          if (csvView) csvView.style.display = 'none';
+          if (dashboardView) dashboardView.style.display = 'block';
+        }
+      }
+      function route(){
+        const h = (location.hash || '#dashboard').replace('#','');
+        showView(h);
+      }
+      window.addEventListener('hashchange', route);
 
       function toast(msg, type='info'){
         const wrap = document.getElementById('toastContainer');
@@ -157,6 +233,24 @@
         }
         startProgress();
         const res = await fetch(url, { method: 'POST', body });
+        endProgress();
+        if (!res.ok) throw new Error('Request failed');
+        return await res.json();
+      }
+
+      async function uploadFile(url, file){
+        const fd = new FormData();
+        fd.append('file', file);
+        startProgress();
+        const res = await fetch(url, { method: 'POST', body: fd });
+        endProgress();
+        if (!res.ok) throw new Error('Upload failed');
+        return await res.json();
+      }
+
+      async function getJson(url){
+        startProgress();
+        const res = await fetch(url);
         endProgress();
         if (!res.ok) throw new Error('Request failed');
         return await res.json();
@@ -333,9 +427,108 @@
         a.addEventListener('click', () => { startProgress(); });
       });
 
+      // CSV Manager logic
+      function fmtBytes(bytes){
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1024*1024) return (bytes/1024).toFixed(1)+' KB';
+        return (bytes/1024/1024).toFixed(1)+' MB';
+      }
+      function fmtDate(ts){
+        try { return new Date(ts*1000).toLocaleString(); } catch(e){ return String(ts); }
+      }
+      function renderCsvRows(files){
+        csvTableBody.innerHTML = '';
+        files.forEach(f => {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td>${f.name}${f.active ? ' <span class=\"chip sm\">Active</span>' : ''}</td>
+            <td>${fmtBytes(f.size)} · ${fmtDate(f.mtime)}</td>
+            <td class=\"actions-inline\">
+              <button class=\"btn sm icon-btn\" aria-label=\"Set Active\" title=\"Set Active\" data-act=\"select\" data-name=\"${f.name}\"><iconify-icon icon=\"mdi:check-circle-outline\"></iconify-icon></button>
+              <button class=\"btn ghost sm icon-btn\" aria-label=\"Preview\" title=\"Preview\" data-act=\"preview\" data-name=\"${f.name}\"><iconify-icon icon=\"mdi:eye-outline\"></iconify-icon></button>
+              <a class=\"btn ghost sm icon-btn\" aria-label=\"Download\" title=\"Download\" href=\"/api/csv/download/${encodeURIComponent(f.name)}\"><iconify-icon icon=\"mdi:download\"></iconify-icon></a>
+              <button class=\"btn danger sm icon-btn\" aria-label=\"Delete\" title=\"Delete\" data-act=\"delete\" data-name=\"${f.name}\"><iconify-icon icon=\"mdi:trash-can-outline\"></iconify-icon></button>
+            </td>`;
+          csvTableBody.appendChild(tr);
+        });
+      }
+      async function loadCsvList(){
+        try{
+          const data = await getJson('/api/csv/list');
+          if (data && Array.isArray(data.files)){
+            renderCsvRows(data.files);
+          }
+        }catch(e){ toast('Failed to load CSV list','error'); }
+      }
+      async function selectCsv(name){
+        try{
+          const resp = await postForm('/api/csv/select', { name });
+          if (resp && resp.active){
+            activeCsv.textContent = resp.active;
+            toast('Active CSV set to '+resp.active, 'success');
+            await loadCsvList();
+            // reload leads page 1
+            window.location.href = '/?page=1' + (campaignSelect.value ? ('&campaign='+encodeURIComponent(campaignSelect.value)) : '');
+          }
+        }catch(e){ alert('Failed to set active CSV'); }
+      }
+      async function previewCsv(name){
+        try{
+          const data = await getJson('/api/csv/preview?name='+encodeURIComponent(name)+'&limit=10');
+          previewTitle.textContent = 'Preview: ' + name;
+          // headers
+          previewHead.innerHTML = '';
+          (data.headers||[]).forEach(h => {
+            const th = document.createElement('th'); th.textContent = h; previewHead.appendChild(th);
+          });
+          // rows
+          previewBody.innerHTML = '';
+          (data.rows||[]).forEach(r => {
+            const tr = document.createElement('tr');
+            (data.headers||[]).forEach(h => {
+              const td = document.createElement('td'); td.textContent = r[h] || ''; tr.appendChild(td);
+            });
+            previewBody.appendChild(tr);
+          });
+          previewWrap.style.display = 'block';
+        }catch(e){ alert('Failed to preview file'); }
+      }
+      async function deleteCsv(name){
+        if (!confirm('Delete '+name+'?')) return;
+        startProgress();
+        try{
+          const res = await fetch('/api/csv/'+encodeURIComponent(name), { method: 'DELETE' });
+          endProgress();
+          if (!res.ok){
+            const t = await res.text();
+            throw new Error(t||'Failed');
+          }
+          toast('Deleted '+name, 'success');
+          await loadCsvList();
+        }catch(e){ alert('Failed to delete (if it is active, select another CSV first)'); }
+      }
+      csvTableBody.addEventListener('click', (ev) => {
+        const btn = ev.target.closest('button'); if (!btn) return;
+        const act = btn.getAttribute('data-act');
+        const name = btn.getAttribute('data-name');
+        if (act === 'select') selectCsv(name);
+        else if (act === 'preview') previewCsv(name);
+        else if (act === 'delete') deleteCsv(name);
+      });
+      uploadCsvBtn.addEventListener('click', async () => {
+        const f = csvFileInput.files && csvFileInput.files[0];
+        if (!f) { alert('Choose a CSV file'); return; }
+        try{ await uploadFile('/api/csv/upload', f); toast('Uploaded '+f.name, 'success'); await loadCsvList(); }
+        catch(e){ alert('Upload failed'); }
+      });
+      refreshCsvBtn.addEventListener('click', loadCsvList);
+      closePreviewBtn.addEventListener('click', () => { previewWrap.style.display = 'none'; });
+
       // Poll status
       refreshStatus();
       setInterval(refreshStatus, 1000);
+      // Initial route
+      route();
     })();
   </script>
 {% endblock %}

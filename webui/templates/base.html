@@ -9,6 +9,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/style.css" />
+  <script src="https://code.iconify.design/iconify-icon/2.1.0/iconify-icon.min.js"></script>
 </head>
 <body>
   <div id="topProgress" class="top-progress" aria-hidden="true"></div>
@@ -21,9 +22,24 @@
     </div>
   </header>
 
-  <main class="container with-bottom-pad">
-    {% block content %}{% endblock %}
-  </main>
+  <div class="app-shell">
+    <aside class="sidebar">
+      {% block sidebar %}
+      <nav class="panel" style="padding:12px;">
+        <div style="font-weight:600; margin-bottom:8px;">Menu</div>
+        <div style="display:flex; flex-direction:column; gap:8px;">
+          <a href="#dashboard" class="btn ghost">Dashboard</a>
+          <a href="#csv" class="btn ghost">CSV Manager</a>
+        </div>
+      </nav>
+      {% endblock %}
+    </aside>
+    <main class="main-content">
+      <div class="container with-bottom-pad">
+        {% block content %}{% endblock %}
+      </div>
+    </main>
+  </div>
 
   <footer class="app-footer">
     <div class="container">
