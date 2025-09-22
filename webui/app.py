@@ -1,4 +1,117 @@
+# -----------------------------
+# Dynamic Campaigns helpers
+# -----------------------------
+
 from __future__ import annotations
+
+import json
+import os
+
+DEFAULT_AGENT_CONST = "ENHANCED_DEMANDIFY_CALLER_INSTRUCTIONS"
+DEFAULT_SESSION_CONST = "SESSION_INSTRUCTION"
+
+
+def _slugify(name: str) -> str:
+    base = "".join(ch.lower() if ch.isalnum() else "-" for ch in (name or "").strip())
+    while "--" in base:
+        base = base.replace("--", "-")
+    return base.strip("-") or "campaign"
+
+
+def _load_campaigns_store() -> List[Dict[str, str]]:
+    try:
+        if CAMPAIGNS_STORE.exists():
+            return json.loads(CAMPAIGNS_STORE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return []
+
+
+def _save_campaigns_store(items: List[Dict[str, str]]) -> None:
+    try:
+        CAMPAIGNS_STORE.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _generate_prompt_module(module_name: str, agent_text: str, session_text: str) -> Path:
+    """Create a python module under campaigns_prompts/ with required constants."""
+    p = CAMPAIGNS_DIR / f"{module_name}.py"
+    content = (
+        "# Auto-generated campaign prompt module\n"
+        f"{DEFAULT_AGENT_CONST} = '''\n{agent_text}\n'''.strip()\n\n"
+        f"{DEFAULT_SESSION_CONST} = '''\n{session_text}\n'''.strip()\n"
+    )
+    try:
+        if p.exists():
+            old = p.read_text(encoding="utf-8")
+            if old == content:
+                # No change; avoid touching mtime to prevent dev server reload loop
+                return p
+    except Exception:
+        pass
+    p.write_text(content, encoding="utf-8")
+    return p
+
+
+def _list_dynamic_campaigns() -> Dict[str, tuple[str, str, str]]:
+    """Return mapping like CAMPAIGNS for custom campaigns."""
+    items = _load_campaigns_store()
+    m: Dict[str, tuple[str, str, str]] = {}
+    for it in items:
+        name = it.get("name") or ""
+        module = it.get("module") or ""
+        if name and module:
+            # UI label: "CleanName (module)" to be consistent with agent.py keys
+            key = f"{name} ({module})"
+            m[key] = (f"campaigns_prompts.{module}", DEFAULT_AGENT_CONST, DEFAULT_SESSION_CONST)
+    return m
+
+
+# Optional: Supabase integration for campaigns
+_SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
+_SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+
+def _supabase_client():
+    try:
+        if not (_SUPABASE_URL and _SUPABASE_SERVICE_ROLE_KEY):
+            return None
+        from supabase import create_client  # type: ignore
+        return create_client(_SUPABASE_URL, _SUPABASE_SERVICE_ROLE_KEY)
+    except Exception:
+        return None
+
+
+def _sync_from_supabase_if_available() -> List[Dict[str, str]]:
+    """Fetch campaigns from Supabase table 'campaigns' if exists; mirror to local files.
+    Table columns expected: name (text), module (text), agent_text (text), session_text (text), created_at (timestamptz default now())
+    """
+    client = _supabase_client()
+    if not client:
+        return _load_campaigns_store()
+    try:
+        resp = client.table("campaigns").select("name,module,agent_text,session_text").execute()
+        rows = getattr(resp, "data", []) or []
+        items: List[Dict[str, str]] = []
+        for r in rows:
+            name = (r.get("name") or "").strip()
+            module = (r.get("module") or "").strip()
+            atext = r.get("agent_text") or ""
+            stext = r.get("session_text") or ""
+            if not (name and module):
+                continue
+            # Ensure local prompt module exists and mirrors Supabase content
+            try:
+                _generate_prompt_module(module, atext, stext)
+            except Exception:
+                pass
+            items.append({"name": name, "module": module})
+        # Update local store to reflect remote
+        _save_campaigns_store(items)
+        return items
+    except Exception:
+        # Fall back to local store if table missing or any error
+        return _load_campaigns_store()
 
 import os
 import sys
@@ -20,6 +133,9 @@ LEADS_CSV = os.getenv("LEADS_CSV_PATH", str(BASE_DIR / "leads.csv"))
 CSV_DIR = Path(os.getenv("LEADS_CSV_DIR", str(BASE_DIR))).resolve()
 CSV_DIR.mkdir(parents=True, exist_ok=True)
 _SELECTED_FILE_STORE = BASE_DIR / ".leads_csv"
+CAMPAIGNS_DIR = BASE_DIR / "campaigns_prompts"
+CAMPAIGNS_DIR.mkdir(parents=True, exist_ok=True)
+CAMPAIGNS_STORE = BASE_DIR / "campaigns.json"
 
 # Import campaign mapping and display helper from backend
 try:
@@ -153,8 +269,17 @@ def spawn_call(lead_index_1based: int, campaign_key: Optional[str]) -> None:
     env["LEAD_INDEX"] = str(lead_index_1based)
 
     # Apply campaign env if provided
-    if campaign_key and campaign_key in CAMPAIGNS:
-        mod, agent_attr, session_attr = CAMPAIGNS[campaign_key]
+    def _all_campaigns_map() -> Dict[str, tuple[str, str, str]]:
+        m = dict(CAMPAIGNS)
+        try:
+            m.update(_list_dynamic_campaigns())
+        except Exception:
+            pass
+        return m
+
+    cmap = _all_campaigns_map()
+    if campaign_key and campaign_key in cmap:
+        mod, agent_attr, session_attr = cmap[campaign_key]
         env["CAMPAIGN_PROMPT_MODULE"] = mod
         env["CAMPAIGN_AGENT_NAME"] = agent_attr
         env["CAMPAIGN_SESSION_NAME"] = session_attr
@@ -256,9 +381,14 @@ async def dashboard(request: Request, page: int = 1, campaign: Optional[str] = N
     start = (page - 1) * PAGE_SIZE
     end = min(start + PAGE_SIZE, total)
 
-    # Clean campaign names for dropdown - exclude 'Default' variants to keep only three campaigns
+    # Merge built-in and dynamic campaigns for dropdown
+    all_campaigns = dict(CAMPAIGNS)
+    try:
+        all_campaigns.update(_list_dynamic_campaigns())
+    except Exception:
+        pass
     campaign_options = []
-    for k in CAMPAIGNS.keys():
+    for k in all_campaigns.keys():
         clean = _campaign_display_name(k)
         if clean.lower().startswith("default"):
             continue
@@ -399,13 +529,211 @@ async def api_csv_download(name: str):
 
 
 # -----------------------------
+# Campaigns Management API
+# -----------------------------
+
+@app.get("/api/campaigns/list")
+async def api_campaigns_list():
+    # If Supabase configured, sync down first
+    items = _sync_from_supabase_if_available()
+    # add built-ins (read-only)
+    builtin = []
+    for k in CAMPAIGNS.keys():
+        builtin.append({
+            "name": _campaign_display_name(k),
+            "module": CAMPAIGNS[k][0],
+            "builtin": True,
+            "key": k,
+        })
+    return JSONResponse({"ok": True, "builtin": builtin, "custom": items})
+
+
+@app.post("/api/campaigns/create")
+async def api_campaigns_create(name: str = Form(...), agent_text: str = Form(""), session_text: str = Form(""), module: str = Form("") ):
+    name = (name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Name required")
+    items = _load_campaigns_store()
+    # If a module was provided, prefer it; else derive from name
+    provided = (module or "").strip()
+    slug = _slugify(provided if provided else name)
+    # ensure unique slug
+    base_slug = slug
+    i = 1
+    existing = {it.get("module") for it in items}
+    while slug in existing:
+        slug = f"{base_slug}-{i}"; i += 1
+    # write module file locally
+    _generate_prompt_module(slug, agent_text or "", session_text or "")
+    # try supabase first
+    client = _supabase_client()
+    supabase_error = None
+    if client:
+        try:
+            client.table("campaigns").insert({
+                "name": name,
+                "module": slug,
+                "agent_text": agent_text or "",
+                "session_text": session_text or "",
+            }).execute()
+        except Exception as e:
+            supabase_error = str(e)
+    # always update local store as mirror
+    items.append({"name": name, "module": slug})
+    _save_campaigns_store(items)
+    return JSONResponse({"ok": True, "name": name, "module": slug, "supabase_error": supabase_error})
+
+
+@app.delete("/api/campaigns/{module}")
+async def api_campaigns_delete(module: str):
+    module = (module or "").strip()
+    items = _load_campaigns_store()
+    found = None
+    for it in items:
+        if it.get("module") == module:
+            found = it
+            break
+    if not found:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    # remove from supabase first if available
+    client = _supabase_client()
+    if client:
+        try:
+            client.table("campaigns").delete().eq("module", module).execute()
+        except Exception:
+            pass
+    # remove local file
+    try:
+        (CAMPAIGNS_DIR / f"{module}.py").unlink(missing_ok=True)
+    except Exception:
+        pass
+    # save store
+    items = [it for it in items if it.get("module") != module]
+    _save_campaigns_store(items)
+    return JSONResponse({"ok": True})
+
+
+# Additional Campaigns endpoints: get, update, upload prompts, seed supabase
+
+def _read_prompts_for_module(module: str) -> tuple[str, str]:
+    """Import the prompt module and read constants. Falls back to empty strings on error."""
+    try:
+        import importlib
+        mod = importlib.import_module(f"campaigns_prompts.{module}")
+        agent_text = getattr(mod, DEFAULT_AGENT_CONST, "")
+        session_text = getattr(mod, DEFAULT_SESSION_CONST, "")
+        return str(agent_text or ""), str(session_text or "")
+    except Exception:
+        return "", ""
+
+
+@app.get("/api/campaigns/get")
+async def api_campaigns_get(module: str):
+    module = (module or "").strip()
+    items = _load_campaigns_store()
+    name = next((it.get("name") for it in items if it.get("module") == module), "")
+    atext, stext = _read_prompts_for_module(module)
+    if not name:
+        # If not found locally but module file exists, use module as name
+        name = module
+    return JSONResponse({"ok": True, "name": name, "module": module, "agent_text": atext, "session_text": stext})
+
+
+@app.post("/api/campaigns/update")
+async def api_campaigns_update(module: str = Form(...), name: str = Form(""), agent_text: str = Form(""), session_text: str = Form("")):
+    module = (module or "").strip()
+    name = (name or "").strip() or module
+    # Update local prompt file
+    _generate_prompt_module(module, agent_text or "", session_text or "")
+    # Update local store name
+    items = _load_campaigns_store()
+    found = False
+    for it in items:
+        if it.get("module") == module:
+            it["name"] = name
+            found = True
+            break
+    if not found:
+        items.append({"name": name, "module": module})
+    _save_campaigns_store(items)
+    # Upsert in Supabase if available
+    client = _supabase_client()
+    if client:
+        try:
+            client.table("campaigns").upsert({
+                "name": name,
+                "module": module,
+                "agent_text": agent_text or "",
+                "session_text": session_text or "",
+            }, on_conflict="module").execute()
+        except Exception:
+            pass
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/campaigns/upload_prompts")
+async def api_campaigns_upload_prompts(which: str = Form(...), file: UploadFile = File(...)):
+    which = (which or "").strip().lower()
+    if which not in ("agent", "session"):
+        raise HTTPException(status_code=400, detail="which must be 'agent' or 'session'")
+    try:
+        content = (await file.read()).decode("utf-8", errors="ignore")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Failed to read file")
+    return JSONResponse({"ok": True, "which": which, "text": content})
+
+
+@app.post("/api/campaigns/seed_supabase")
+async def api_campaigns_seed_supabase():
+    client = _supabase_client()
+    if not client:
+        raise HTTPException(status_code=400, detail="Supabase not configured")
+    items = _load_campaigns_store()
+    upserted = 0
+    errors: List[str] = []
+    for it in items:
+        module = it.get("module") or ""
+        name = it.get("name") or module
+        atext, stext = _read_prompts_for_module(module)
+        try:
+            client.table("campaigns").upsert({
+                "name": name,
+                "module": module,
+                "agent_text": atext,
+                "session_text": stext,
+            }, on_conflict="module").execute()
+            upserted += 1
+        except Exception as e:
+            errors.append(f"{module}: {e}")
+            continue
+    return JSONResponse({"ok": True, "count": upserted, "errors": errors})
+
+
+@app.get("/api/campaigns/module_file")
+async def api_campaigns_module_file(module: str):
+    module = (module or "").strip()
+    p = CAMPAIGNS_DIR / f"{module}.py"
+    if not p.exists():
+        raise HTTPException(status_code=404, detail="Module file not found")
+    try:
+        text = p.read_text(encoding="utf-8")
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to read module file")
+    return JSONResponse({"ok": True, "module": module, "path": str(p), "content": text})
+# -----------------------------
 # JSON APIs for console control
 # -----------------------------
 
 @app.post("/api/select_campaign")
 async def api_select_campaign(campaign: Optional[str] = Form(None)):
     global SELECTED_CAMPAIGN
-    if campaign and campaign not in CAMPAIGNS:
+    # validate against built-in + dynamic
+    valid = set(CAMPAIGNS.keys())
+    try:
+        valid.update(_list_dynamic_campaigns().keys())
+    except Exception:
+        pass
+    if campaign and campaign not in valid:
         raise HTTPException(status_code=400, detail="Unknown campaign")
     SELECTED_CAMPAIGN = campaign
     label = _campaign_display_name(campaign) if campaign else None
