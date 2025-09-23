@@ -8,7 +8,7 @@ This document thoroughly describes every file, module, endpoint, configuration, 
 
 ## Highlights
 
-- **Agentic Dialer**: Live, voice-first agent using `livekit-agents` with Google’s Realtime LLM backend.
+- **Agentic Dialer**: Live, Voice-first agent using `livekit-agents` with Google’s Realtime LLM backend.
 - **Modern Web UI**: FastAPI + Jinja2 + CSS for a responsive, dark-themed dashboard.
 - **Console Mode**: Quickly test flows from your terminal, with campaign and prospect selection.
 - **Campaigns as Modules**: Swap prompt packs at runtime (SplashBI, KonfHub, Zoom Phone, Default).
