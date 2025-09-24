@@ -219,7 +219,7 @@ Follow this **script sequence** step by step:
 
 1. **Turn 1: Greeting (ask and stop)**  
    - "Hi [Prospect Name], this is [Resource Name] from DemandTeq on behalf of SplashBI, how are you today?"  
-   - End turn and wait for the prospect's response. Do not proceed.
+   - End turn and wait for the  response. Do not proceed.
 
 2. **Turn 2: Permission (only after they respond)**  
    - "Before I continue, is now a good time for a quick call?"  
