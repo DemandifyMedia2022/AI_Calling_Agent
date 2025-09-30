@@ -924,6 +924,48 @@ async def issue_token(room: str, identity: str):
     return JSONResponse({"token": token})
 
 
+@app.get("/api/leads")
+async def api_get_leads(page: int = 1):
+    """New endpoint to serve leads data as JSON for React frontend"""
+    leads = read_leads(LEADS_CSV)
+    total = len(leads)
+    total_pages = max(1, math.ceil(total / PAGE_SIZE))
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * PAGE_SIZE
+    end = min(start + PAGE_SIZE, total)
+    
+    return JSONResponse({
+        "ok": True,
+        "leads": leads[start:end],
+        "page": page,
+        "total_pages": total_pages,
+        "start_index": start,
+        "total_leads": total
+    })
+
+
+@app.get("/api/campaigns")
+async def api_get_campaigns():
+    """Get available campaigns for dropdown"""
+    all_campaigns = dict(CAMPAIGNS)
+    try:
+        all_campaigns.update(_list_dynamic_campaigns())
+    except Exception:
+        pass
+    
+    campaign_options = []
+    for k in all_campaigns.keys():
+        clean = _campaign_display_name(k)
+        if clean.lower().startswith("default"):
+            continue
+        campaign_options.append({"key": k, "label": clean})
+    
+    return JSONResponse({
+        "ok": True,
+        "campaigns": campaign_options
+    })
+
+
 @app.post("/next")
 async def call_next(
     background_tasks: BackgroundTasks,
