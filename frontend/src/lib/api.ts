@@ -2,7 +2,7 @@ import axios from 'axios'
 import type { Lead, ApiStatus, Campaign, CsvFile, CsvPreview, CampaignData } from '@/types'
 
 const api = axios.create({
-  baseURL: window.location.origin,
+  baseURL: import.meta.env.VITE_API_BASE_URL || window.location.origin,
   timeout: 30000,
 })
 

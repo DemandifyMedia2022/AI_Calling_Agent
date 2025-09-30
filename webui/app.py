@@ -125,6 +125,7 @@ from fastapi import FastAPI, Request, Form, BackgroundTasks, HTTPException, Uplo
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, Response, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from fastapi.middleware.cors import CORSMiddleware
 
 # Use project root as base
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -152,6 +153,22 @@ except Exception:
         return name
 
 app = FastAPI(title="AI Calling Agent - Web UI")
+
+# Configure CORS for frontend deployment
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",  # Local development
+        "http://127.0.0.1:3000",  # Local development alternative
+        "https://*.vercel.app",    # Vercel deployments
+        "https://*.netlify.app",   # Netlify deployments (if used)
+        # Add your production domain here
+        # "https://yourdomain.com",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Mount static and templates
 STATIC_DIR = Path(__file__).resolve().parent / "static"

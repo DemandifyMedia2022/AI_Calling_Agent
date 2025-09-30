@@ -1,80 +1,129 @@
-# Git ignore for AI_Voice_Agent project
-
-# Byte-compiled / optimized / DLL files
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
-*.pyc
-*.pyo
-
-# C extensions
 *.so
-
-# Distribution / packaging
+.Python
 build/
+develop-eggs/
 dist/
+downloads/
 eggs/
-*.egg
-*.egg-info/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
 pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
 
-# Virtual environments
-.venv/
-venv/
-ENV/
-env/
-.env
-env.bak/
-venv.bak/
+# PyInstaller
+*.manifest
+*.spec
 
 # Installer logs
 pip-log.txt
+pip-delete-this-directory.txt
 
-# Unit test / coverage
-.pytest_cache/
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
 .coverage
 .coverage.*
-htmlcov/
+.cache
+nosetests.xml
 coverage.xml
-junit-*.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
 
-# IDEs and editors
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDEs
 .vscode/
 .idea/
-*.sublime-workspace
+*.swp
+*.swo
+*~
 
-# OS files
+# OS
 .DS_Store
-Thumbs.db
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
 ehthumbs.db
+Thumbs.db
 
-# Logs and runtime files
-*.log
-logs/
-*.pid
-*.sock
+# Project specific
+campaigns_prompts/*.py
+!campaigns_prompts/__init__.py
+campaigns.json
+.leads_csv
+leads.csv
 
-# Sensitive or local data (project-specific)
-AI_Calling_Agent/.env
-AI_Calling_Agent/*.csv
-AI_Calling_Agent/.leads_csv
-AI_Calling_Agent/*.sqlite3
-
-# Flask / web ui
-instance/
-
-# Node / frontend
+# Node.js (for frontend)
 node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+.pnpm-debug.log*
 
-# dotenv and environment overrides
-.env.local
-.env.*.local
+# Frontend build
+frontend/dist/
+frontend/build/
 
-# Caches
-.cache/
-
-# Misc
+# Logs
+logs
 *.log
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage directory used by tools like istanbul
+coverage/
+
+# nyc test coverage
+.nyc_output
+
+# ESLint cache
+.eslintcache
+
+# Optional npm cache directory
+.npm
+
+# Optional REPL history
+.node_repl_history
+
+# Output of 'npm pack'
+*.tgz
+
+# Yarn Integrity file
+.yarn-integrity
+
+# dotenv environment variables file
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Vercel
+.vercel
