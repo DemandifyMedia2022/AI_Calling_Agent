@@ -45,7 +45,7 @@ export default function CsvManager() {
       await uploadCsv(uploadFile)
       toast({
         title: "Success",
-        description: `Uploaded ${uploadFile.name} successfully`,
+        description: `Uploaded ${uploadFile.name} Successfully`,
       })
       setUploadFile(null)
       const fileInput = document.getElementById('csv-upload') as HTMLInputElement
