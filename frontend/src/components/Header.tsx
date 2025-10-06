@@ -1,4 +1,5 @@
-import { Link } from 'react-router-dom'
+﻿import { Link } from 'react-router-dom'
+import { ThemeToggle } from './ThemeToggle'
 
 export default function Header() {
   return (
@@ -8,11 +9,14 @@ export default function Header() {
           <Link to="/" className="font-bold text-primary tracking-wide">
             AI Dialer
           </Link>
-          <nav>
-            <Link to="/" className="text-muted-foreground hover:text-foreground transition-colors ml-3">
-              Dashboard
-            </Link>
-          </nav>
+          <div className="flex items-center gap-3">
+            <nav>
+              <Link to="/" className="text-muted-foreground hover:text-foreground transition-colors">
+                Dashboard
+              </Link>
+            </nav>
+            <ThemeToggle />
+          </div>
         </div>
       </div>
     </header>
