@@ -6,11 +6,19 @@ from __future__ import annotations
 
 import json
 import os
+from supabase import create_client
+from dotenv import load_dotenv
+from typing import List, Dict, Optional
 
 DEFAULT_AGENT_CONST = "ENHANCED_DEMANDIFY_CALLER_INSTRUCTIONS"
 DEFAULT_SESSION_CONST = "SESSION_INSTRUCTION"
 CAMPAIGN_MODULE_PREFIX = "backend.campaigns_prompts"
 
+load_dotenv()
+
+supabase_url = os.getenv("SUPABASE_URL")
+supabase_key = os.getenv("SUPABASE_ANON_KEY")
+supabase = create_client(supabase_url, supabase_key)
 
 def _slugify(name: str) -> str:
     base = "".join(ch.lower() if ch.isalnum() else "-" for ch in (name or "").strip())
@@ -20,11 +28,35 @@ def _slugify(name: str) -> str:
 
 
 def _load_campaigns_store() -> List[Dict[str, str]]:
+    if supabase:
+        try:
+            logger.debug("Fetching campaigns from Supabase")
+            resp = supabase.table("campaigns").select("name,module,agent_text,session_text").execute()
+            rows = getattr(resp, "data", []) or []
+            items: List[Dict[str, str]] = []
+            for r in rows:
+                name = (r.get("name") or "").strip()
+                module = (r.get("module") or "").strip()
+                if not (name and module):
+                    continue
+                agent_text = r.get("agent_text") or ""
+                session_text = r.get("session_text") or ""
+                try:
+                    _generate_prompt_module(module, agent_text, session_text)
+                except Exception:
+                    pass
+                items.append({"name": name, "module": module})
+            _save_campaigns_store(items)
+            logger.info("Loaded %d campaigns from Supabase", len(items))
+            return items
+        except Exception:
+            logger.exception("Failed to load campaigns from Supabase; falling back to local cache")
     try:
         if CAMPAIGNS_STORE.exists():
+            logger.debug("Loading campaigns from local cache at %s", CAMPAIGNS_STORE)
             return json.loads(CAMPAIGNS_STORE.read_text(encoding="utf-8"))
     except Exception:
-        pass
+        logger.exception("Failed to load campaigns from local cache")
     return []
 
 
@@ -88,55 +120,74 @@ def _list_dynamic_campaigns() -> Dict[str, tuple[str, str, str]]:
 # Optional: Supabase integration for campaigns
 _SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
 _SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+_SUPABASE_STORAGE_BUCKET = os.getenv("SUPABASE_PROSPECTS_BUCKET", "prospect-sheets").strip() or "prospect-sheets"
+
+
+import logging
+
+logger = logging.getLogger(__name__)
 
 def _supabase_client():
     try:
         if not (_SUPABASE_URL and _SUPABASE_SERVICE_ROLE_KEY):
+            logger.debug("Supabase client not available due to missing URL or service role key")
             return None
         from supabase import create_client  # type: ignore
+        logger.debug("Initializing Supabase client")
         return create_client(_SUPABASE_URL, _SUPABASE_SERVICE_ROLE_KEY)
-    except Exception:
+    except Exception as e:
+        logger.error(f"Failed to initialize Supabase client: {e}")
         return None
 
 
-def _sync_from_supabase_if_available() -> List[Dict[str, str]]:
-    """Fetch campaigns from Supabase table 'campaigns' if exists; mirror to local files.
-    Table columns expected: name (text), module (text), agent_text (text), session_text (text), created_at (timestamptz default now())
-    """
+def _ensure_prospect_bucket(client) -> Optional[str]:
+    """Ensure the Supabase storage bucket for prospect sheets exists."""
+    bucket = _SUPABASE_STORAGE_BUCKET
+    try:
+        buckets = client.storage.list_buckets()
+        if isinstance(buckets, dict):
+            data = buckets.get("data", [])
+            buckets = data if isinstance(data, list) else []
+        existing = {b.get("name") for b in (buckets or []) if isinstance(b, dict)}
+        if bucket not in existing:
+            try:
+                client.storage.create_bucket(bucket, {"public": False})
+            except TypeError:
+                client.storage.create_bucket(bucket, public=False)
+        return bucket
+    except Exception:
+        try:
+            try:
+                client.storage.create_bucket(bucket, {"public": False})
+            except TypeError:
+                client.storage.create_bucket(bucket, public=False)
+            return bucket
+        except Exception:
+            return None
+
+
+def _supabase_storage_bucket() -> tuple[Optional[object], Optional[str]]:
     client = _supabase_client()
     if not client:
-        return _load_campaigns_store()
-    try:
-        resp = client.table("campaigns").select("name,module,agent_text,session_text").execute()
-        rows = getattr(resp, "data", []) or []
-        items: List[Dict[str, str]] = []
-        for r in rows:
-            name = (r.get("name") or "").strip()
-            module = (r.get("module") or "").strip()
-            atext = r.get("agent_text") or ""
-            stext = r.get("session_text") or ""
-            if not (name and module):
-                continue
-            # Ensure local prompt module exists and mirrors Supabase content
-            try:
-                _generate_prompt_module(module, atext, stext)
-            except Exception:
-                pass
-            items.append({"name": name, "module": module})
-        # Update local store to reflect remote
-        _save_campaigns_store(items)
-        return items
-    except Exception:
-        # Fall back to local store if table missing or any error
-        return _load_campaigns_store()
+        return None, None
+    bucket = _ensure_prospect_bucket(client)
+    if not bucket:
+        return client, None
+    return client, bucket
+
+
+def _sync_from_supabase_if_available() -> List[Dict[str, str]]:
+    """Fetch campaigns from Supabase and mirror to local cache."""
+    return _load_campaigns_store()
 
 import os
 import sys
 import csv
 import math
 import subprocess
+from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, Request, Form, BackgroundTasks, HTTPException, UploadFile, File
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, Response, FileResponse
@@ -154,6 +205,7 @@ _SELECTED_FILE_STORE = BASE_DIR / ".leads_csv"
 CAMPAIGNS_DIR = BASE_DIR / "campaigns_prompts"
 CAMPAIGNS_DIR.mkdir(parents=True, exist_ok=True)
 CAMPAIGNS_STORE = BASE_DIR / "campaigns.json"
+SELECTED_CSV_REMOTE_KEY: Optional[str] = None
 
 # Import campaign mapping and display helper from backend
 from backend.agent import CAMPAIGNS, _campaign_display_name
@@ -231,27 +283,114 @@ def _safe_csv_name(name: str) -> str:
     return "".join(safe)
 
 
-def _persist_selected_csv(path: Path) -> None:
+def _csv_local_path(name: str) -> Path:
+    return (CSV_DIR / _safe_csv_name(name)).resolve()
+
+
+def _download_csv_from_supabase(name: str, force: bool = False) -> Optional[Path]:
+    """Ensure the given remote CSV is cached locally and return the local path."""
+    client, bucket = _supabase_storage_bucket()
+    sanitized = _safe_csv_name(name)
+    local_path = _csv_local_path(sanitized)
+    if not client or not bucket:
+        return local_path if local_path.exists() else None
+    if local_path.exists() and not force:
+        return local_path
     try:
-        _SELECTED_FILE_STORE.write_text(str(path.resolve()), encoding="utf-8")
+        data = client.storage.from_(bucket).download(sanitized)
+        if isinstance(data, dict):
+            data = data.get("data")
+        if hasattr(data, "read"):
+            data = data.read()
+        if isinstance(data, str):
+            data = data.encode("utf-8")
+        if not isinstance(data, (bytes, bytearray)):
+            return local_path if local_path.exists() else None
+        local_path.write_bytes(data)
+        return local_path
+    except Exception:
+        return local_path if local_path.exists() else None
+
+
+def _supabase_csv_list() -> Optional[List[Dict[str, Any]]]:
+    client, bucket = _supabase_storage_bucket()
+    if not client or not bucket:
+        return None
+    try:
+        result = client.storage.from_(bucket).list(path="")
+        if isinstance(result, dict):
+            result = result.get("data", [])
+        if not isinstance(result, list):
+            return []
+        return result
+    except Exception:
+        return None
+
+
+def _delete_supabase_csv(name: str) -> None:
+    client, bucket = _supabase_storage_bucket()
+    if not client or not bucket:
+        return
+    sanitized = _safe_csv_name(name)
+    try:
+        client.storage.from_(bucket).remove([sanitized])
     except Exception:
         pass
 
 
-def _load_persisted_selected_csv() -> Optional[Path]:
+def _upload_csv_to_supabase(name: str, content: bytes) -> Optional[str]:
+    client, bucket = _supabase_storage_bucket()
+    if not client or not bucket:
+        return None
+    sanitized = _safe_csv_name(name)
+    options = {"contentType": "text/csv", "upsert": True}
     try:
-        p = _SELECTED_FILE_STORE.read_text(encoding="utf-8").strip()
-        candidate = Path(p)
-        if candidate.suffix.lower() == ".csv" and candidate.exists():
-            return candidate
+        client.storage.from_(bucket).upload(sanitized, content, options)
+    except Exception:
+        try:
+            client.storage.from_(bucket).update(sanitized, content, options)
+        except Exception:
+            return None
+    return sanitized
+
+
+def _persist_selected_csv(path: Path, remote_key: Optional[str]) -> None:
+    try:
+        data = {"local": str(path.resolve()), "remote": remote_key or ""}
+        _SELECTED_FILE_STORE.write_text(json.dumps(data), encoding="utf-8")
     except Exception:
         pass
-    return None
+
+
+def _load_persisted_selected_csv() -> tuple[Optional[Path], Optional[str]]:
+    try:
+        raw = _SELECTED_FILE_STORE.read_text(encoding="utf-8").strip()
+        if not raw:
+            return None, None
+        try:
+            payload = json.loads(raw)
+            if isinstance(payload, dict):
+                local = Path(payload.get("local", ""))
+                remote = payload.get("remote") or None
+                if local.suffix.lower() == ".csv" and local.exists():
+                    return local, remote
+        except json.JSONDecodeError:
+            candidate = Path(raw)
+            if candidate.suffix.lower() == ".csv" and candidate.exists():
+                return candidate, None
+    except Exception:
+        pass
+    return None, None
 
 
 def read_leads(csv_path: str) -> List[Dict[str, str]]:
     """Read leads with as many useful fields as available."""
     leads: List[Dict[str, str]] = []
+    try:
+        if SELECTED_CSV_REMOTE_KEY:
+            _download_csv_from_supabase(SELECTED_CSV_REMOTE_KEY, force=False)
+    except Exception:
+        pass
     try:
         with open(csv_path, "r", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
@@ -280,9 +419,10 @@ def get_lead_by_index_1based(idx1: int) -> Optional[Dict[str, str]]:
 
 
 # Initialize selected CSV from persisted file if available
-persisted = _load_persisted_selected_csv()
-if persisted:
-    LEADS_CSV = str(persisted)
+_persisted_path, _persisted_remote = _load_persisted_selected_csv()
+if _persisted_path:
+    LEADS_CSV = str(_persisted_path)
+    SELECTED_CSV_REMOTE_KEY = _persisted_remote
 
 
 def spawn_call(lead_index_1based: int, campaign_key: Optional[str]) -> None:
@@ -455,7 +595,47 @@ async def call_lead(
 
 @app.get("/api/csv/list")
 async def api_csv_list():
-    files = []
+    supabase_items = _supabase_csv_list()
+    files: List[Dict[str, Any]] = []
+    active_remote = _safe_csv_name(SELECTED_CSV_REMOTE_KEY or "") if SELECTED_CSV_REMOTE_KEY else None
+
+    if supabase_items is not None:
+        for item in supabase_items:
+            if not isinstance(item, dict):
+                continue
+            name = _safe_csv_name(item.get("name", ""))
+            if not name:
+                continue
+            maybe_meta = item.get("metadata") or {}
+            size = maybe_meta.get("size")
+            if size is None:
+                size = item.get("size", 0)
+            ts_raw = item.get("updated_at") or item.get("last_accessed_at") or item.get("created_at")
+            mtime = 0
+            if isinstance(ts_raw, str):
+                try:
+                    ts_raw = ts_raw.replace("Z", "+00:00") if ts_raw.endswith("Z") else ts_raw
+                    mtime = int(datetime.fromisoformat(ts_raw).timestamp())
+                except Exception:
+                    mtime = 0
+            local_path = _csv_local_path(name)
+            active = False
+            if active_remote:
+                active = active_remote == name
+            elif LEADS_CSV:
+                try:
+                    active = local_path.exists() and str(local_path) == str(Path(LEADS_CSV).resolve())
+                except Exception:
+                    active = False
+            files.append({
+                "name": name,
+                "size": int(size or 0),
+                "mtime": mtime,
+                "active": active,
+            })
+        return JSONResponse({"ok": True, "files": files})
+
+    # Fallback to local filesystem listing if Supabase unavailable
     try:
         for p in sorted(CSV_DIR.glob("*.csv")):
             try:
@@ -484,8 +664,10 @@ async def api_csv_upload(file: UploadFile = File(...)):
         # Basic size guard (10MB)
         if len(content) > 10 * 1024 * 1024:
             raise HTTPException(status_code=413, detail="File too large (max 10MB)")
+        # Upload to Supabase storage first (best effort)
+        remote_name = _upload_csv_to_supabase(name, content)
         dest.write_bytes(content)
-        return JSONResponse({"ok": True, "name": name})
+        return JSONResponse({"ok": True, "name": name, "remote": remote_name or ""})
     except HTTPException:
         raise
     except Exception:
@@ -494,28 +676,65 @@ async def api_csv_upload(file: UploadFile = File(...)):
 
 @app.post("/api/csv/select")
 async def api_csv_select(name: str = Form(...)):
-    global LEADS_CSV
+    global LEADS_CSV, SELECTED_CSV_REMOTE_KEY
     name = _safe_csv_name(name)
-    target = (CSV_DIR / name).resolve()
+    client, bucket = _supabase_storage_bucket()
+    if client and bucket:
+        local = _download_csv_from_supabase(name, force=True)
+        if not local or not local.exists():
+            raise HTTPException(status_code=404, detail="CSV not found in Supabase")
+        LEADS_CSV = str(local)
+        SELECTED_CSV_REMOTE_KEY = name
+        _persist_selected_csv(local, SELECTED_CSV_REMOTE_KEY)
+        return JSONResponse({"ok": True, "active": name})
+
+    target = _csv_local_path(name)
     if not target.exists() or target.suffix.lower() != ".csv":
         raise HTTPException(status_code=404, detail="CSV not found")
     LEADS_CSV = str(target)
-    _persist_selected_csv(target)
+    SELECTED_CSV_REMOTE_KEY = None
+    _persist_selected_csv(target, None)
     return JSONResponse({"ok": True, "active": name})
 
 
 @app.delete("/api/csv/{name}")
 async def api_csv_delete(name: str):
+    global SELECTED_CSV_REMOTE_KEY, LEADS_CSV
     name = _safe_csv_name(name)
-    target = (CSV_DIR / name).resolve()
     # Prevent deleting active CSV in-use
-    if LEADS_CSV and Path(LEADS_CSV).resolve() == target:
+    if SELECTED_CSV_REMOTE_KEY and SELECTED_CSV_REMOTE_KEY == name:
         raise HTTPException(status_code=400, detail="Cannot delete the active CSV. Select another file first.")
+    if LEADS_CSV:
+        try:
+            if Path(LEADS_CSV).resolve() == _csv_local_path(name):
+                raise HTTPException(status_code=400, detail="Cannot delete the active CSV. Select another file first.")
+        except HTTPException:
+            raise
+        except Exception:
+            pass
+
+    supabase_error: Optional[str] = None
+    client, bucket = _supabase_storage_bucket()
+    if client and bucket:
+        try:
+            _delete_supabase_csv(name)
+        except Exception as e:
+            supabase_error = str(e)
+            logger.exception("Failed to delete CSV '%s' from Supabase", name)
+        local = _csv_local_path(name)
+        if local.exists():
+            try:
+                local.unlink()
+            except Exception:
+                pass
+        return JSONResponse({"ok": True, "supabase_error": supabase_error})
+
+    target = _csv_local_path(name)
     if not target.exists() or target.suffix.lower() != ".csv":
         raise HTTPException(status_code=404, detail="CSV not found")
     try:
         target.unlink()
-        return JSONResponse({"ok": True})
+        return JSONResponse({"ok": True, "supabase_error": supabase_error})
     except Exception:
         raise HTTPException(status_code=500, detail="Failed to delete file")
 
@@ -523,9 +742,15 @@ async def api_csv_delete(name: str):
 @app.get("/api/csv/preview")
 async def api_csv_preview(name: str, limit: int = 10):
     name = _safe_csv_name(name)
-    target = (CSV_DIR / name).resolve()
-    if not target.exists():
-        raise HTTPException(status_code=404, detail="CSV not found")
+    client, bucket = _supabase_storage_bucket()
+    if client and bucket:
+        target = _download_csv_from_supabase(name, force=False)
+        if not target or not target.exists():
+            raise HTTPException(status_code=404, detail="CSV not found in Supabase")
+    else:
+        target = _csv_local_path(name)
+        if not target.exists():
+            raise HTTPException(status_code=404, detail="CSV not found")
     try:
         rows = []
         headers: List[str] = []
@@ -544,9 +769,15 @@ async def api_csv_preview(name: str, limit: int = 10):
 @app.get("/api/csv/download/{name}")
 async def api_csv_download(name: str):
     name = _safe_csv_name(name)
-    target = (CSV_DIR / name).resolve()
-    if not target.exists():
-        raise HTTPException(status_code=404, detail="CSV not found")
+    client, bucket = _supabase_storage_bucket()
+    if client and bucket:
+        target = _download_csv_from_supabase(name, force=False)
+        if not target or not target.exists():
+            raise HTTPException(status_code=404, detail="CSV not found in Supabase")
+    else:
+        target = _csv_local_path(name)
+        if not target.exists():
+            raise HTTPException(status_code=404, detail="CSV not found")
     return FileResponse(str(target), media_type="text/csv", filename=name)
 
 
@@ -600,6 +831,8 @@ async def api_campaigns_create(name: str = Form(...), agent_text: str = Form("")
             }).execute()
         except Exception as e:
             supabase_error = str(e)
+            logger.exception("Failed to insert campaign '%s' into Supabase", slug)
+
     # always update local store as mirror
     items.append({"name": name, "module": slug})
     _save_campaigns_store(items)
@@ -619,11 +852,13 @@ async def api_campaigns_delete(module: str):
         raise HTTPException(status_code=404, detail="Campaign not found")
     # remove from supabase first if available
     client = _supabase_client()
+    supabase_error = None
     if client:
         try:
             client.table("campaigns").delete().eq("module", module).execute()
-        except Exception:
-            pass
+        except Exception as e:
+            supabase_error = str(e)
+            logger.exception("Failed to delete campaign '%s' from Supabase", module)
     # remove local file
     try:
         (CAMPAIGNS_DIR / f"{module}.py").unlink(missing_ok=True)
@@ -632,13 +867,29 @@ async def api_campaigns_delete(module: str):
     # save store
     items = [it for it in items if it.get("module") != module]
     _save_campaigns_store(items)
-    return JSONResponse({"ok": True})
+    return JSONResponse({"ok": True, "supabase_error": supabase_error})
 
 
 # Additional Campaigns endpoints: get, update, upload prompts, seed supabase
 
 def _read_prompts_for_module(module: str) -> tuple[str, str]:
     """Import the prompt module and read constants. Falls back to empty strings on error."""
+    client = _supabase_client()
+    if client:
+        try:
+            resp = (
+                client.table("campaigns")
+                .select("agent_text,session_text")
+                .eq("module", module)
+                .limit(1)
+                .execute()
+            )
+            rows = getattr(resp, "data", []) or []
+            if rows:
+                entry = rows[0]
+                return str(entry.get("agent_text") or ""), str(entry.get("session_text") or "")
+        except Exception:
+            pass
     try:
         import importlib
         module_path = _normalize_prompt_module(module)
@@ -681,6 +932,7 @@ async def api_campaigns_update(module: str = Form(...), name: str = Form(""), ag
     _save_campaigns_store(items)
     # Upsert in Supabase if available
     client = _supabase_client()
+    supabase_error = None
     if client:
         try:
             client.table("campaigns").upsert({
@@ -689,9 +941,10 @@ async def api_campaigns_update(module: str = Form(...), name: str = Form(""), ag
                 "agent_text": agent_text or "",
                 "session_text": session_text or "",
             }, on_conflict="module").execute()
-        except Exception:
-            pass
-    return JSONResponse({"ok": True})
+        except Exception as e:
+            supabase_error = str(e)
+            logger.exception("Failed to upsert campaign '%s' in Supabase", module)
+    return JSONResponse({"ok": True, "supabase_error": supabase_error})
 
 
 @app.post("/api/campaigns/upload_prompts")
@@ -728,6 +981,7 @@ async def api_campaigns_seed_supabase():
             upserted += 1
         except Exception as e:
             errors.append(f"{module}: {e}")
+            logger.exception("Failed to upsert campaign '%s' during Supabase seeding", module)
             continue
     return JSONResponse({"ok": True, "count": upserted, "errors": errors})
 
