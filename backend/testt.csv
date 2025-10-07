@@ -1,11 +1,4 @@
 prospect_name,resource_name,job_title,company_name,email,phone,timezone
-Sophia Brown,Alice Rivera,Finance Director,Skyline Inc,sophia.brown@futuresoft.com,-2964,Australia/Sydney
-Daniel Davis,Alice Rivera,Applications Lead,BrightPath,daniel.davis@greentech.co,-9115,America/New_York
-Olivia Smith,Alice Rivera,VP of IT,BrightPath,olivia.smith@omnitech.ai,-3518,Europe/Madrid
-David Davis,Alice Rivera,CFO,Skyline Inc,david.davis@pioneersys.com,-2894,Asia/Kolkata
-John Jones,Alice Rivera,VP of IT,OmniTech,john.jones@omnitech.ai,-8970,Europe/Paris
-Maria Williams,Alice Rivera,VP of IT,NextGen Corp,maria.williams@brightpath.org,-7716,Europe/London
-Laura Williams,Alice Rivera,Finance Manager,DataCore,laura.williams@greentech.co,-3819,Europe/Paris
 David Miller,Alice Rivera,CFO,CyberNova,david.miller@datacore.net,-2986,Australia/Sydney
 Daniel Taylor,Alice Rivera,CFO,BrightPath,daniel.taylor@futuresoft.com,-2348,Asia/Kolkata
 Maria Brown,Alice Rivera,ERP Manager,NextGen Corp,maria.brown@nextgen.com,-5354,Europe/Berlin

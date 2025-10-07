@@ -6,9 +6,10 @@ from __future__ import annotations
 
 import json
 import os
+import logging
 from supabase import create_client
 from dotenv import load_dotenv
-from typing import List, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 DEFAULT_AGENT_CONST = "ENHANCED_DEMANDIFY_CALLER_INSTRUCTIONS"
 DEFAULT_SESSION_CONST = "SESSION_INSTRUCTION"
@@ -19,6 +20,8 @@ load_dotenv()
 supabase_url = os.getenv("SUPABASE_URL")
 supabase_key = os.getenv("SUPABASE_ANON_KEY")
 supabase = create_client(supabase_url, supabase_key)
+
+logger = logging.getLogger(__name__)
 
 def _slugify(name: str) -> str:
     base = "".join(ch.lower() if ch.isalnum() else "-" for ch in (name or "").strip())
@@ -120,7 +123,7 @@ def _list_dynamic_campaigns() -> Dict[str, tuple[str, str, str]]:
 # Optional: Supabase integration for campaigns
 _SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
 _SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
-_SUPABASE_STORAGE_BUCKET = os.getenv("SUPABASE_PROSPECTS_BUCKET", "prospect-sheets").strip() or "prospect-sheets"
+_SUPABASE_PROSPECTS_TABLE = os.getenv("SUPABASE_PROSPECTS_TABLE", "prospect_csvs").strip() or "prospect_csvs"
 
 
 import logging
@@ -138,42 +141,6 @@ def _supabase_client():
     except Exception as e:
         logger.error(f"Failed to initialize Supabase client: {e}")
         return None
-
-
-def _ensure_prospect_bucket(client) -> Optional[str]:
-    """Ensure the Supabase storage bucket for prospect sheets exists."""
-    bucket = _SUPABASE_STORAGE_BUCKET
-    try:
-        buckets = client.storage.list_buckets()
-        if isinstance(buckets, dict):
-            data = buckets.get("data", [])
-            buckets = data if isinstance(data, list) else []
-        existing = {b.get("name") for b in (buckets or []) if isinstance(b, dict)}
-        if bucket not in existing:
-            try:
-                client.storage.create_bucket(bucket, {"public": False})
-            except TypeError:
-                client.storage.create_bucket(bucket, public=False)
-        return bucket
-    except Exception:
-        try:
-            try:
-                client.storage.create_bucket(bucket, {"public": False})
-            except TypeError:
-                client.storage.create_bucket(bucket, public=False)
-            return bucket
-        except Exception:
-            return None
-
-
-def _supabase_storage_bucket() -> tuple[Optional[object], Optional[str]]:
-    client = _supabase_client()
-    if not client:
-        return None, None
-    bucket = _ensure_prospect_bucket(client)
-    if not bucket:
-        return client, None
-    return client, bucket
 
 
 def _sync_from_supabase_if_available() -> List[Dict[str, str]]:
@@ -287,71 +254,92 @@ def _csv_local_path(name: str) -> Path:
     return (CSV_DIR / _safe_csv_name(name)).resolve()
 
 
+def _supabase_csv_list() -> Optional[List[Dict[str, Any]]]:
+    client = _supabase_client()
+    if not client:
+        return None
+    try:
+        resp = (
+            client
+            .table(_SUPABASE_PROSPECTS_TABLE)
+            .select("name,size,uploaded_at")
+            .order("uploaded_at", desc=True)
+            .execute()
+        )
+        data = getattr(resp, "data", []) or []
+        if not isinstance(data, list):
+            return []
+        return data
+    except Exception:
+        logger.exception("Failed to list prospect CSVs from Supabase table")
+        return None
+
+
 def _download_csv_from_supabase(name: str, force: bool = False) -> Optional[Path]:
     """Ensure the given remote CSV is cached locally and return the local path."""
-    client, bucket = _supabase_storage_bucket()
+    client = _supabase_client()
     sanitized = _safe_csv_name(name)
     local_path = _csv_local_path(sanitized)
-    if not client or not bucket:
+    if not client:
         return local_path if local_path.exists() else None
     if local_path.exists() and not force:
         return local_path
     try:
-        data = client.storage.from_(bucket).download(sanitized)
-        if isinstance(data, dict):
-            data = data.get("data")
-        if hasattr(data, "read"):
-            data = data.read()
-        if isinstance(data, str):
-            data = data.encode("utf-8")
-        if not isinstance(data, (bytes, bytearray)):
+        resp = (
+            client
+            .table(_SUPABASE_PROSPECTS_TABLE)
+            .select("content")
+            .eq("name", sanitized)
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(resp, "data", []) or []
+        if not rows:
             return local_path if local_path.exists() else None
-        local_path.write_bytes(data)
+        content = rows[0].get("content") or ""
+        if not isinstance(content, str):
+            return local_path if local_path.exists() else None
+        local_path.write_text(content, encoding="utf-8")
         return local_path
     except Exception:
+        logger.exception("Failed to download prospect CSV '%s' from Supabase", sanitized)
         return local_path if local_path.exists() else None
 
 
-def _supabase_csv_list() -> Optional[List[Dict[str, Any]]]:
-    client, bucket = _supabase_storage_bucket()
-    if not client or not bucket:
-        return None
-    try:
-        result = client.storage.from_(bucket).list(path="")
-        if isinstance(result, dict):
-            result = result.get("data", [])
-        if not isinstance(result, list):
-            return []
-        return result
-    except Exception:
-        return None
-
-
-def _delete_supabase_csv(name: str) -> None:
-    client, bucket = _supabase_storage_bucket()
-    if not client or not bucket:
-        return
-    sanitized = _safe_csv_name(name)
-    try:
-        client.storage.from_(bucket).remove([sanitized])
-    except Exception:
-        pass
-
-
 def _upload_csv_to_supabase(name: str, content: bytes) -> Optional[str]:
-    client, bucket = _supabase_storage_bucket()
-    if not client or not bucket:
+    client = _supabase_client()
+    if not client:
         return None
     sanitized = _safe_csv_name(name)
-    options = {"contentType": "text/csv", "upsert": True}
     try:
-        client.storage.from_(bucket).upload(sanitized, content, options)
-    except Exception:
-        try:
-            client.storage.from_(bucket).update(sanitized, content, options)
-        except Exception:
-            return None
+        text = content.decode("utf-8")
+    except UnicodeDecodeError:
+        text = content.decode("utf-8", errors="ignore")
+    payload = {
+        "name": sanitized,
+        "content": text,
+        "size": len(content),
+        "uploaded_at": datetime.utcnow().isoformat(),
+    }
+    try:
+        client.table(_SUPABASE_PROSPECTS_TABLE).upsert(payload, on_conflict="name").execute()
+    except Exception as exc:
+        logger.exception("Failed to upsert prospect CSV '%s' into Supabase", sanitized)
+        return None
     return sanitized
+
+
+def _delete_supabase_csv(name: str) -> Optional[str]:
+    client = _supabase_client()
+    if not client:
+        return None
+    sanitized = _safe_csv_name(name)
+    try:
+        client.table(_SUPABASE_PROSPECTS_TABLE).delete().eq("name", sanitized).execute()
+    except Exception as exc:
+        logger.exception("Failed to delete prospect CSV '%s' from Supabase", sanitized)
+        return str(exc)
+    return None
 
 
 def _persist_selected_csv(path: Path, remote_key: Optional[str]) -> None:
@@ -606,11 +594,8 @@ async def api_csv_list():
             name = _safe_csv_name(item.get("name", ""))
             if not name:
                 continue
-            maybe_meta = item.get("metadata") or {}
-            size = maybe_meta.get("size")
-            if size is None:
-                size = item.get("size", 0)
-            ts_raw = item.get("updated_at") or item.get("last_accessed_at") or item.get("created_at")
+            size = item.get("size", 0)
+            ts_raw = item.get("uploaded_at")
             mtime = 0
             if isinstance(ts_raw, str):
                 try:
@@ -678,11 +663,8 @@ async def api_csv_upload(file: UploadFile = File(...)):
 async def api_csv_select(name: str = Form(...)):
     global LEADS_CSV, SELECTED_CSV_REMOTE_KEY
     name = _safe_csv_name(name)
-    client, bucket = _supabase_storage_bucket()
-    if client and bucket:
-        local = _download_csv_from_supabase(name, force=True)
-        if not local or not local.exists():
-            raise HTTPException(status_code=404, detail="CSV not found in Supabase")
+    local = _download_csv_from_supabase(name, force=True)
+    if local and local.exists():
         LEADS_CSV = str(local)
         SELECTED_CSV_REMOTE_KEY = name
         _persist_selected_csv(local, SELECTED_CSV_REMOTE_KEY)
@@ -713,21 +695,17 @@ async def api_csv_delete(name: str):
         except Exception:
             pass
 
-    supabase_error: Optional[str] = None
-    client, bucket = _supabase_storage_bucket()
-    if client and bucket:
-        try:
-            _delete_supabase_csv(name)
-        except Exception as e:
-            supabase_error = str(e)
-            logger.exception("Failed to delete CSV '%s' from Supabase", name)
+    supabase_error = _delete_supabase_csv(name)
+    if supabase_error is None:
         local = _csv_local_path(name)
         if local.exists():
             try:
                 local.unlink()
             except Exception:
                 pass
-        return JSONResponse({"ok": True, "supabase_error": supabase_error})
+        if SELECTED_CSV_REMOTE_KEY == name:
+            SELECTED_CSV_REMOTE_KEY = None
+        return JSONResponse({"ok": True, "supabase_error": None})
 
     target = _csv_local_path(name)
     if not target.exists() or target.suffix.lower() != ".csv":
@@ -742,15 +720,11 @@ async def api_csv_delete(name: str):
 @app.get("/api/csv/preview")
 async def api_csv_preview(name: str, limit: int = 10):
     name = _safe_csv_name(name)
-    client, bucket = _supabase_storage_bucket()
-    if client and bucket:
-        target = _download_csv_from_supabase(name, force=False)
-        if not target or not target.exists():
-            raise HTTPException(status_code=404, detail="CSV not found in Supabase")
-    else:
+    target = _download_csv_from_supabase(name, force=False)
+    if not target or not target.exists():
         target = _csv_local_path(name)
         if not target.exists():
-            raise HTTPException(status_code=404, detail="CSV not found")
+            raise HTTPException(statuscode=404, detail="CSV not found")
     try:
         rows = []
         headers: List[str] = []
@@ -769,12 +743,8 @@ async def api_csv_preview(name: str, limit: int = 10):
 @app.get("/api/csv/download/{name}")
 async def api_csv_download(name: str):
     name = _safe_csv_name(name)
-    client, bucket = _supabase_storage_bucket()
-    if client and bucket:
-        target = _download_csv_from_supabase(name, force=False)
-        if not target or not target.exists():
-            raise HTTPException(status_code=404, detail="CSV not found in Supabase")
-    else:
+    target = _download_csv_from_supabase(name, force=False)
+    if not target or not target.exists():
         target = _csv_local_path(name)
         if not target.exists():
             raise HTTPException(status_code=404, detail="CSV not found")
