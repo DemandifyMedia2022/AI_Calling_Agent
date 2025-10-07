@@ -1,11 +1,16 @@
 @echo off
+setlocal ENABLEDELAYEDEXPANSION
+
+rem Ensure commands run relative to this script
+pushd "%~dp0"
+
 echo Starting AI Calling Agent - Full Stack...
 echo.
 
 echo ============================================
 echo Starting Backend (FastAPI)...
 echo ============================================
-start /b cmd /c "start-backend.bat"
+start "Backend" cmd /c "%~dp0start-backend.bat"
 
 echo Waiting for backend to initialize...
 timeout /t 5 /nobreak >nul
@@ -14,7 +19,7 @@ echo.
 echo ============================================
 echo Starting Frontend (React + Vite)...
 echo ============================================
-start /b cmd /c "start-frontend.bat"
+start "Frontend" cmd /c "%~dp0start-frontend.bat"
 
 echo.
 echo ============================================
@@ -30,8 +35,13 @@ pause >nul
 
 echo.
 echo Stopping services...
-taskkill /f /im "python.exe" >nul 2>&1
-taskkill /f /im "node.exe" >nul 2>&1
+rem Attempt graceful shutdown before forcing
+for %%P in (python.exe pythonw.exe node.exe) do (
+    taskkill /f /im "%%P" >nul 2>&1
+)
+
 echo Services stopped.
 
+popd
+endlocal
 pause

@@ -9,6 +9,7 @@ import os
 
 DEFAULT_AGENT_CONST = "ENHANCED_DEMANDIFY_CALLER_INSTRUCTIONS"
 DEFAULT_SESSION_CONST = "SESSION_INSTRUCTION"
+CAMPAIGN_MODULE_PREFIX = "backend.campaigns_prompts"
 
 
 def _slugify(name: str) -> str:
@@ -54,6 +55,21 @@ def _generate_prompt_module(module_name: str, agent_text: str, session_text: str
     return p
 
 
+def _normalize_prompt_module(module: str) -> str:
+    name = (module or "").strip()
+    if not name:
+        return name
+    if name.startswith("backend."):
+        return name
+    if name.startswith("campaigns_prompts."):
+        suffix = name.split(".", 1)[1] if "." in name else ""
+        return f"{CAMPAIGN_MODULE_PREFIX}.{suffix}" if suffix else CAMPAIGN_MODULE_PREFIX
+    if name.startswith("prompts") and "." not in name:
+        return f"backend.{name}"
+    if "." not in name:
+        return f"{CAMPAIGN_MODULE_PREFIX}.{name}"
+    return name
+
 def _list_dynamic_campaigns() -> Dict[str, tuple[str, str, str]]:
     """Return mapping like CAMPAIGNS for custom campaigns."""
     items = _load_campaigns_store()
@@ -64,7 +80,8 @@ def _list_dynamic_campaigns() -> Dict[str, tuple[str, str, str]]:
         if name and module:
             # UI label: "CleanName (module)" to be consistent with agent.py keys
             key = f"{name} ({module})"
-            m[key] = (f"campaigns_prompts.{module}", DEFAULT_AGENT_CONST, DEFAULT_SESSION_CONST)
+            module_path = _normalize_prompt_module(module)
+            m[key] = (module_path, DEFAULT_AGENT_CONST, DEFAULT_SESSION_CONST)
     return m
 
 
@@ -129,7 +146,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 # Use project root as base
 BASE_DIR = Path(__file__).resolve().parents[1]
-AGENT_PATH = str(BASE_DIR / "agent.py")
+AGENT_MODULE = "backend.agent"
 LEADS_CSV = os.getenv("LEADS_CSV_PATH", str(BASE_DIR / "leads.csv"))
 CSV_DIR = Path(os.getenv("LEADS_CSV_DIR", str(BASE_DIR))).resolve()
 CSV_DIR.mkdir(parents=True, exist_ok=True)
@@ -139,19 +156,7 @@ CAMPAIGNS_DIR.mkdir(parents=True, exist_ok=True)
 CAMPAIGNS_STORE = BASE_DIR / "campaigns.json"
 
 # Import campaign mapping and display helper from backend
-try:
-    sys.path.insert(0, str(BASE_DIR))
-    from agent import CAMPAIGNS, _campaign_display_name
-except Exception:
-    CAMPAIGNS = {
-        "Default": ("prompts", "ENHANCED_DEMANDIFY_CALLER_INSTRUCTIONS", "SESSION_INSTRUCTION"),
-        "SplashBI": ("prompts2", "ENHANCED_DEMANDIFY_CALLER_INSTRUCTIONS", "SESSION_INSTRUCTION"),
-        "KonfHub": ("prompts3", "ENHANCED_DEMANDIFY_CALLER_INSTRUCTIONS", "SESSION_INSTRUCTION"),
-        "Zoom Phone": ("prompts4", "ENHANCED_DEMANDIFY_CALLER_INSTRUCTIONS", "SESSION_INSTRUCTION"),
-    }
-    def _campaign_display_name(name: str) -> str:  # type: ignore
-        return name
-
+from backend.agent import CAMPAIGNS, _campaign_display_name
 app = FastAPI(title="AI Calling Agent - Web UI")
 
 # Configure CORS for frontend deployment
@@ -297,7 +302,7 @@ def spawn_call(lead_index_1based: int, campaign_key: Optional[str]) -> None:
     cmap = _all_campaigns_map()
     if campaign_key and campaign_key in cmap:
         mod, agent_attr, session_attr = cmap[campaign_key]
-        env["CAMPAIGN_PROMPT_MODULE"] = mod
+        env["CAMPAIGN_PROMPT_MODULE"] = _normalize_prompt_module(mod)
         env["CAMPAIGN_AGENT_NAME"] = agent_attr
         env["CAMPAIGN_SESSION_NAME"] = session_attr
 
@@ -312,7 +317,7 @@ def spawn_call(lead_index_1based: int, campaign_key: Optional[str]) -> None:
             # Create new process group to allow signal/termination management
             creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         CURRENT_PROC = subprocess.Popen(
-            [sys.executable, AGENT_PATH, "console"], env=env, creationflags=creationflags
+            [sys.executable, "-m", AGENT_MODULE, "console"], env=env, creationflags=creationflags
         )
         CURRENT_STATUS = "running"
         CURRENT_LEAD_INDEX = lead_index_1based
@@ -324,11 +329,11 @@ def spawn_agent_connect_room(room_name: str, campaign_key: Optional[str]) -> Non
     env["RUN_SINGLE_CALL"] = "1"
     if campaign_key and campaign_key in CAMPAIGNS:
         mod, agent_attr, session_attr = CAMPAIGNS[campaign_key]
-        env["CAMPAIGN_PROMPT_MODULE"] = mod
+        env["CAMPAIGN_PROMPT_MODULE"] = _normalize_prompt_module(mod)
         env["CAMPAIGN_AGENT_NAME"] = agent_attr
         env["CAMPAIGN_SESSION_NAME"] = session_attr
     # Use LiveKit CLI subcommand 'connect' with a room name; the Agents CLI will join that room
-    subprocess.Popen([sys.executable, AGENT_PATH, "connect", "--room", room_name], env=env)
+    subprocess.Popen([sys.executable, "-m", AGENT_MODULE, "connect", "--room", room_name], env=env)
 
 
 def _end_current_call() -> bool:
@@ -636,7 +641,8 @@ def _read_prompts_for_module(module: str) -> tuple[str, str]:
     """Import the prompt module and read constants. Falls back to empty strings on error."""
     try:
         import importlib
-        mod = importlib.import_module(f"campaigns_prompts.{module}")
+        module_path = _normalize_prompt_module(module)
+        mod = importlib.import_module(module_path)
         agent_text = getattr(mod, DEFAULT_AGENT_CONST, "")
         session_text = getattr(mod, DEFAULT_SESSION_CONST, "")
         return str(agent_text or ""), str(session_text or "")
@@ -997,3 +1003,6 @@ async def call_next(
     if campaign:
         url += f"&campaign={campaign}"
     return RedirectResponse(url=url, status_code=303)
+
+
+

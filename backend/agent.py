@@ -1,20 +1,47 @@
+import csv
+import importlib
+import logging
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
 from dotenv import load_dotenv
 
 from livekit import agents
 from livekit.agents import AgentSession, Agent, RoomInputOptions
-from livekit.plugins import (
-    noise_cancellation,
-)
-from livekit.plugins import google
-from prompts import ENHANCED_DEMANDIFY_CALLER_INSTRUCTIONS, SESSION_INSTRUCTION
-import importlib
-import sys
-import csv
-import os
-import logging
-from typing import Optional, Tuple, List, Dict
-import subprocess
+from livekit.plugins import noise_cancellation, google
+
+BASE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = BASE_DIR.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from backend.prompts import ENHANCED_DEMANDIFY_CALLER_INSTRUCTIONS, SESSION_INSTRUCTION
+
 load_dotenv()
+
+CAMPAIGN_MODULE_PREFIX = "backend.campaigns_prompts"
+
+
+def _normalize_prompt_module(module: str | None) -> str:
+    name = (module or "").strip()
+    if not name:
+        return name
+    if name.startswith("backend."):
+        return name
+    if name.startswith("campaigns_prompts."):
+        suffix = name.split(".", 1)[1] if "." in name else ""
+        return f"{CAMPAIGN_MODULE_PREFIX}.{suffix}" if suffix else CAMPAIGN_MODULE_PREFIX
+    if name.startswith("prompts") and "." not in name:
+        return f"backend.{name}"
+    if "." not in name:
+        return f"{CAMPAIGN_MODULE_PREFIX}.{name}"
+    return name
+
+AGENT_MODULE = "backend.agent"
+
 
 # Global logging: keep terminal clean
 logging.basicConfig(level=logging.WARNING, format="%(message)s")
@@ -39,10 +66,10 @@ logging.getLogger("livekit.plugins.google").setLevel(logging.ERROR)
 
 CAMPAIGNS = {
     # name: (module, agent_attr, session_attr)
-    "Default (prompts)": ("prompts", "ENHANCED_DEMANDIFY_CALLER_INSTRUCTIONS", "SESSION_INSTRUCTION"),
-    "SplashBI (prompts2)": ("prompts2", "ENHANCED_DEMANDIFY_CALLER_INSTRUCTIONS", "SESSION_INSTRUCTION"),
-    "KonfHub (prompts3)": ("prompts3", "ENHANCED_DEMANDIFY_CALLER_INSTRUCTIONS", "SESSION_INSTRUCTION"),
-    "Zoom Phone (prompts4)": ("prompts4", "ENHANCED_DEMANDIFY_CALLER_INSTRUCTIONS", "SESSION_INSTRUCTION"),
+    "Default (prompts)": (_normalize_prompt_module("prompts"), "ENHANCED_DEMANDIFY_CALLER_INSTRUCTIONS", "SESSION_INSTRUCTION"),
+    "SplashBI (prompts2)": (_normalize_prompt_module("prompts2"), "ENHANCED_DEMANDIFY_CALLER_INSTRUCTIONS", "SESSION_INSTRUCTION"),
+    "KonfHub (prompts3)": (_normalize_prompt_module("prompts3"), "ENHANCED_DEMANDIFY_CALLER_INSTRUCTIONS", "SESSION_INSTRUCTION"),
+    "Zoom Phone (prompts4)": (_normalize_prompt_module("prompts4"), "ENHANCED_DEMANDIFY_CALLER_INSTRUCTIONS", "SESSION_INSTRUCTION"),
 }
 
 CAMPAIGN_OVERRIDE: tuple[str, str, str] | None = None
@@ -92,7 +119,7 @@ def _load_campaign_prompts(module_name: str | None = None,
 
     Returns: (agent_instructions: str, session_instructions: str)
     """
-    module_name = module_name or os.getenv("CAMPAIGN_PROMPT_MODULE", "prompts")
+    module_name = _normalize_prompt_module(module_name or os.getenv("CAMPAIGN_PROMPT_MODULE", "prompts"))
     agent_attr = agent_attr or os.getenv("CAMPAIGN_AGENT_NAME", "ENHANCED_DEMANDIFY_CALLER_INSTRUCTIONS")
     session_attr = session_attr or os.getenv("CAMPAIGN_SESSION_NAME", "SESSION_INSTRUCTION")
 
@@ -203,7 +230,7 @@ async def entrypoint(ctx: agents.JobContext):
     )
 
     # Load leads from CSV and determine which prospect to use
-    leads_csv = os.getenv("LEADS_CSV_PATH", os.path.join(os.path.dirname(__file__), "leads.csv"))
+    leads_csv = os.getenv("LEADS_CSV_PATH", str(BASE_DIR / "leads.csv"))
     all_leads = _read_leads(leads_csv)
     lead: Optional[Dict[str, str]] = None
 
@@ -301,12 +328,12 @@ if __name__ == "__main__":
     if sel:
         mod_name, agent_attr, session_attr = sel
         campaign_env = {
-            "CAMPAIGN_PROMPT_MODULE": mod_name,
+            "CAMPAIGN_PROMPT_MODULE": _normalize_prompt_module(mod_name),
             "CAMPAIGN_AGENT_NAME": agent_attr,
             "CAMPAIGN_SESSION_NAME": session_attr,
         }
 
-    leads_csv_path = os.getenv("LEADS_CSV_PATH", os.path.join(os.path.dirname(__file__), "leads.csv"))
+    leads_csv_path = os.getenv("LEADS_CSV_PATH", str(BASE_DIR / "leads.csv"))
     leads_list = _read_leads(leads_csv_path)
     if not leads_list:
         print("No leads found. Please check leads.csv or LEADS_CSV_PATH.")
@@ -387,7 +414,7 @@ if __name__ == "__main__":
         print(_s(f"\n▶ Starting call for lead #{call_index + 1}... (returning to menu when finished)\n", MAGENTA))
         # Use 'console' subcommand so audio I/O (Ctrl+B to toggle Audio/Text) is available
         try:
-            subprocess.run([sys.executable, __file__, "console"], env=child_env, check=False)
+            subprocess.run([sys.executable, "-m", AGENT_MODULE, "console"], env=child_env, check=False)
         except KeyboardInterrupt:
             print(_s("\nCall interrupted. Returning to menu...\n", YELLOW))
 
@@ -400,3 +427,4 @@ if __name__ == "__main__":
                 current_page += 1
 
     sys.exit(0)
+

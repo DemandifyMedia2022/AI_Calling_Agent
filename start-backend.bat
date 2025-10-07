@@ -2,6 +2,9 @@
 echo Starting AI Calling Agent FastAPI Backend...
 echo.
 
+rem Ensure we are running from the project root
+pushd "%~dp0"
+
 echo Checking if virtual environment exists...
 if not exist venv (
     echo Creating virtual environment...
@@ -16,7 +19,7 @@ echo Checking if dependencies are installed...
 pip show fastapi >nul 2>&1
 if %errorlevel% neq 0 (
     echo Installing backend dependencies...
-    pip install -r requirements.txt
+    pip install -r backend\requirements.txt
     echo.
 )
 
@@ -26,6 +29,8 @@ echo Backend will be available at: http://localhost:8000
 echo API documentation available at: http://localhost:8000/docs
 echo.
 
-uvicorn webui.app:app --host 0.0.0.0 --port 8000 --reload
+uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload
+
+popd
 
 pause
